@@ -3,7 +3,7 @@
 # i sklada je w jeden plik lines.csv.
 #
 # Instalacja pakietow (raz):
-#   julia -e 'using Pkg; Pkg.add(["HTTP", "CSV", "DataFrames", "ProgressMeter"])'
+#   julia -e 'using Pkg; Pkg.add(["HTTP", "CSV", "DataFrames"])'
 #
 # Test na samym wodorze (zacznij od tego!):
 #   julia fetch_nist_lines.jl 1 1
@@ -18,7 +18,7 @@
 # Dane: NIST Atomic Spectra Database, https://physics.nist.gov/asd
 # Cytowanie: Kramida, Ralchenko, Reader and NIST ASD Team, NIST Atomic Spectra Database.
 
-using HTTP, CSV, DataFrames, ProgressMeter
+using HTTP, CSV, DataFrames
 
 const URL    = "https://physics.nist.gov/cgi-bin/ASD/lines1.pl"
 const RAWDIR = "raw"
@@ -110,6 +110,19 @@ const KEEP_TEXT = [
     "conf_k" => :conf_k, "term_k" => :term_k, "J_k" => :J_k,
 ]
 
+function read_header(line)
+    header = [clean(h) for h in split(line, '\t')]
+    findcol(prefix) = findfirst(h -> startswith(h, prefix), header)
+    return (header = header,
+            obs = findcol("obs_wl"), ritz = findcol("ritz_wl"),
+            int = findcol("intens"), sp = findcol("sp_num"),
+            extra = Dict(key => findfirst(==(name), header) for (name, key) in KEEP_TEXT))
+end
+
+# NIST powtarza wiersz naglowka przy zmianie osrodka (proznia/powietrze),
+# wiec trzeba go czytac od nowa za kazdym razem.
+is_header(l) = occursin(r"^(element|obs_|ritz_)", l)
+
 function parse_lines(body, Z, sym)
     rows = DataFrame(
         Z = Int[], symbol = String[], ion = Int[],
@@ -118,51 +131,49 @@ function parse_lines(body, Z, sym)
         Aki = String[], conf_i = String[], term_i = String[], J_i = String[],
         conf_k = String[], term_k = String[], J_k = String[],
     )
-    (isempty(body) || occursin("<html", lowercase(first(body, 300)))) && return rows
+    sp_missing = false
+    (isempty(body) || occursin("<html", lowercase(first(body, 300)))) && return rows, sp_missing
 
-    lines = split(body, '\n')
-    hi = findfirst(l -> occursin("obs_wl", l) || occursin("ritz_wl", l), lines)
-    hi === nothing && return rows            # np. "No lines are available"
-
-    header = [clean(h) for h in split(lines[hi], '\t')]
-    findcol(prefix) = findfirst(h -> startswith(h, prefix), header)
-
-    c_obs   = findcol("obs_wl")
-    c_ritz  = findcol("ritz_wl")
-    c_int   = findcol("intens")
-    c_sp    = findcol("sp_num")
-    extra   = [(name, key, findfirst(==(name), header)) for (name, key) in KEEP_TEXT]
-
-    for l in lines[hi+1:end]
+    H = nothing
+    for l in split(body, '\n')
         isempty(strip(l)) && continue
-        cells = [clean(c) for c in split(l, '\t'; keepempty = true)]
-        length(cells) < length(header) && append!(cells, fill("", length(header) - length(cells)))
-        startswith(cells[1], "element") && continue     # powtorzony naglowek
+        if is_header(l)
+            H = read_header(l)
+            if H.obs === nothing && H.ritz === nothing
+                @warn "Naglowek bez kolumn z dlugoscia fali (inna jednostka?) - pomijam te wiersze" sym header = H.header
+                H = nothing
+            end
+            continue
+        end
+        H === nothing && continue
 
-        wl = c_obs  === nothing ? missing : num(cells[c_obs])
-        kind, cidx = "obs", c_obs
+        cells = [clean(c) for c in split(l, '\t'; keepempty = true)]
+        n = length(H.header)
+        length(cells) < n && append!(cells, fill("", n - length(cells)))
+
+        wl = H.obs === nothing ? missing : num(cells[H.obs])
+        kind, cidx = "obs", H.obs
         if ismissing(wl)
-            wl = c_ritz === nothing ? missing : num(cells[c_ritz])
-            kind, cidx = "ritz", c_ritz
+            wl = H.ritz === nothing ? missing : num(cells[H.ritz])
+            kind, cidx = "ritz", H.ritz
         end
         ismissing(wl) && continue
 
-        medium = occursin("vac", header[cidx]) ? "vac" : "air"
-        ion = c_sp === nothing ? 1 : something(tryparse(Int, cells[c_sp]), 1)
-        inten = c_int === nothing ? missing : num(cells[c_int])
-
-        get_extra(key) = begin
-            for (_, k, ci) in extra
-                k == key && ci !== nothing && return cells[ci]
-            end
-            ""
+        medium = occursin("vac", H.header[cidx]) ? "vac" : "air"
+        if H.sp === nothing
+            sp_missing = true               # tylko jeden gatunek w odpowiedzi
+            ion = 1
+        else
+            ion = something(tryparse(Int, cells[H.sp]), 1)
         end
+        inten = H.int === nothing ? missing : num(cells[H.int])
+        extra(key) = (ci = H.extra[key]; ci === nothing ? "" : cells[ci])
 
         push!(rows, (Z, sym, ion, wl, medium, kind, inten,
-                     get_extra(:Aki), get_extra(:conf_i), get_extra(:term_i), get_extra(:J_i),
-                     get_extra(:conf_k), get_extra(:term_k), get_extra(:J_k)))
+                     extra(:Aki), extra(:conf_i), extra(:term_i), extra(:J_i),
+                     extra(:conf_k), extra(:term_k), extra(:J_k)))
     end
-    return rows
+    return rows, sp_missing
 end
 
 # --- main -------------------------------------------------------------------
@@ -173,29 +184,13 @@ function main()
     mkpath(RAWDIR)
 
     frames = DataFrame[]
-    total_lines = 0
-    n = zmax - zmin + 1
-    prog = Progress(n;
-        desc = "Pobieram z NIST: ",
-        dt   = 0.5,
-        showspeed = true,
-        output = stderr)
-
     for Z in zmin:zmax
         sym = SYMBOLS[Z]
-        cached = isfile(joinpath(RAWDIR, "$(lpad(Z, 2, '0'))_$(sym).txt"))
-        next!(prog; showvalues = [
-            (:Z, Z),
-            (:symbol, sym),
-            (:cached, cached),
-            (:lines_so_far, total_lines),
-        ])
         body = fetch_raw(Z, sym)
-        df = parse_lines(body, Z, sym)
-        total_lines += nrow(df)
+        df, sp_missing = parse_lines(body, Z, sym)
+        println(rpad("Z=$Z $sym", 12), nrow(df), " linii", sp_missing ? "  (brak sp_num -> ion=1)" : "")
         nrow(df) > 0 && push!(frames, df)
     end
-    finish!(prog)
 
     if isempty(frames)
         @error "Nie udalo sie sparsowac zadnych linii. Zajrzyj do plikow w $RAWDIR/ - pokaz mi ich poczatek."
@@ -204,6 +199,8 @@ function main()
     all = reduce(vcat, frames)
     CSV.write(OUT, all)
     println("\nZapisano $(nrow(all)) linii do $OUT")
+    println(combine(groupby(all, [:medium, :kind]), nrow => :n,
+                    :wl_nm => minimum => :min_nm, :wl_nm => maximum => :max_nm))
 end
 
 main()
