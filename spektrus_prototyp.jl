@@ -1,8 +1,27 @@
 ### A Pluto.jl notebook ###
-# v0.19.46
+# v1.0.4
 
 using Markdown
 using InteractiveUtils
+
+# This Pluto notebook uses @bind for interactivity. When running this notebook outside of Pluto, the following 'mock version' of @bind gives bound variables a default value (instead of an error).
+macro bind(def, element)
+    #! format: off
+    return quote
+        local iv = try Base.loaded_modules[Base.PkgId(Base.UUID("6e696c72-6542-2067-7265-42206c756150"), "AbstractPlutoDingetjes")].Bonds.initial_value catch; b -> missing; end
+        local el = $(esc(element))
+        global $(esc(def)) = Core.applicable(Base.get, el) ? Base.get(el) : iv(el)
+        el
+    end
+    #! format: on
+end
+
+# ╔═╡ 9735532e-8621-4f11-bec1-f557068e179e
+begin
+    import Pkg
+    Pkg.activate(@__DIR__)   # środowisko projektu (Project.toml obok notebooka)
+    using CairoMakie, CSV, DataFrames, PlutoUI
+end
 
 # ╔═╡ 81eb466a-8faa-420b-a51e-36781af7868b
 md"""
@@ -11,13 +30,6 @@ md"""
 Eksplorator widm emisyjnych na danych z NIST ASD (`spectrum.csv`). Wybierz pierwiastek i zakres,
 przełącz próżnię/powietrze i skalę natężeń. Pseudokolory: UV = fiolet, podczerwień = ciemna czerwień.
 """
-
-# ╔═╡ 9735532e-8621-4f11-bec1-f557068e179e
-begin
-    import Pkg
-    Pkg.activate(@__DIR__)   # środowisko projektu (Project.toml obok notebooka)
-    using CairoMakie, CSV, DataFrames, PlutoUI
-end
 
 # ╔═╡ b3c367fa-571f-4406-b32b-e3bfc541f3f0
 begin
@@ -139,6 +151,43 @@ begin
         "zakres $(round(10^lmin; sigdigits = 2)) – $(round(10^lmax; sigdigits = 2)) (jednostki względne).")
 end
 
+# ╔═╡ 95b49730-1baf-4ce3-8c3f-836672af2ffb
+md"""
+### Najsilniejsze linie w zakresie
+"""
+
+# ╔═╡ 72fe7767-8ba6-48df-a1de-84193032cdc4
+begin
+    top = first(sort(vis, :I; rev = true), 15)
+    select(top, :symbol, :ion,
+           :λ => ByRow(x -> round(x; digits = 4)) => :λ_nm,
+           :I => ByRow(x -> round(x; sigdigits = 3)) => :I_użyte, :n_linii, :intensity, :Aki, :conf_i, :term_i, :J_i, :conf_k, :term_k, :J_k)
+end
+
+# ╔═╡ b8693e3a-dadb-4b3d-a93c-9900ccf2ab45
+md"""
+### Porównanie ze sprawozdaniem (Na, spektroskop pryzmatyczny)
+Dla każdej linii z tabeli szukam w NIST najsilniejszej linii Na w oknie ±2 nm (długości fal w powietrzu).
+Kolumna **dekad** mówi, ile rzędów wielkości poniżej najsilniejszej linii leży ta linia, czyli jaki **próg widoczności** jest potrzebny, żeby ją zobaczyć.
+"""
+
+# ╔═╡ 814de1f5-21b8-41e5-bc79-a2bdb96ed9b0
+begin
+    # λ [nm] z tabeli ze sprawozdania (x to położenie na skali spektroskopu)
+    exp_lines = [653, 616, 589, 568, 516, 507, 441, 433, 429, 423]
+
+    function match_exp(sub, λe, lmax; win = 2.0)
+        λa = vac2air.(sub.wl_vac_nm)
+        idx = findall(x -> abs(x - λe) <= win, λa)
+        isempty(idx) && return (λ_exp = λe, λ_NIST = missing, Δλ = missing,
+                                intensity = missing, dekad = missing, linii_w_oknie = 0)
+        j = idx[argmax(sub.I[idx])]
+        return (λ_exp = λe, λ_NIST = round(λa[j]; digits = 3), Δλ = round(λa[j] - λe; digits = 2),
+                intensity = round(sub.I[j]; sigdigits = 3), dekad = round(lmax - log10(sub.I[j]); digits = 2),
+                linii_w_oknie = length(idx))
+    end
+end
+
 # ╔═╡ 533e7dde-9e80-4606-abc8-5747a5d7d29c
 begin
     fig = Figure(size = (1000, 480), backgroundcolor = RGBf(0.09, 0.09, 0.11))
@@ -181,43 +230,6 @@ begin
     xlims!(ax1, λlo, λhi); xlims!(ax2, λlo, λhi)
     ylims!(ax1, 0, 1);     ylims!(ax2, 0, 1.05)
     fig
-end
-
-# ╔═╡ 95b49730-1baf-4ce3-8c3f-836672af2ffb
-md"""
-### Najsilniejsze linie w zakresie
-"""
-
-# ╔═╡ 72fe7767-8ba6-48df-a1de-84193032cdc4
-begin
-    top = first(sort(vis, :I; rev = true), 15)
-    select(top, :symbol, :ion,
-           :λ => ByRow(x -> round(x; digits = 4)) => :λ_nm,
-           :I => ByRow(x -> round(x; sigdigits = 3)) => :I_użyte, :n_linii, :intensity, :Aki, :conf_i, :term_i, :J_i, :conf_k, :term_k, :J_k)
-end
-
-# ╔═╡ b8693e3a-dadb-4b3d-a93c-9900ccf2ab45
-md"""
-### Porównanie ze sprawozdaniem (Na, spektroskop pryzmatyczny)
-Dla każdej linii z tabeli szukam w NIST najsilniejszej linii Na w oknie ±2 nm (długości fal w powietrzu).
-Kolumna **dekad** mówi, ile rzędów wielkości poniżej najsilniejszej linii leży ta linia, czyli jaki **próg widoczności** jest potrzebny, żeby ją zobaczyć.
-"""
-
-# ╔═╡ 814de1f5-21b8-41e5-bc79-a2bdb96ed9b0
-begin
-    # λ [nm] z tabeli ze sprawozdania (x to położenie na skali spektroskopu)
-    exp_lines = [653, 616, 589, 568, 516, 507, 441, 433, 429, 423]
-
-    function match_exp(sub, λe, lmax; win = 2.0)
-        λa = vac2air.(sub.wl_vac_nm)
-        idx = findall(x -> abs(x - λe) <= win, λa)
-        isempty(idx) && return (λ_exp = λe, λ_NIST = missing, Δλ = missing,
-                                intensity = missing, dekad = missing, linii_w_oknie = 0)
-        j = idx[argmax(sub.I[idx])]
-        return (λ_exp = λe, λ_NIST = round(λa[j]; digits = 3), Δλ = round(λa[j] - λe; digits = 2),
-                intensity = round(sub.I[j]; sigdigits = 3), dekad = round(lmax - log10(sub.I[j]); digits = 2),
-                linii_w_oknie = length(idx))
-    end
 end
 
 # ╔═╡ 3b785249-038d-4d07-bc86-01fcccd05b87
