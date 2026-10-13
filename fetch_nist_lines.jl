@@ -108,6 +108,7 @@ const KEEP_TEXT = [
     "Aki(s^-1)" => :Aki,
     "conf_i" => :conf_i, "term_i" => :term_i, "J_i" => :J_i,
     "conf_k" => :conf_k, "term_k" => :term_k, "J_k" => :J_k,
+    "Ei(cm-1)" => :Ei, "Ek(cm-1)" => :Ek,
 ]
 
 function read_header(line)
@@ -130,6 +131,7 @@ function parse_lines(body, Z, sym)
         intensity = Union{Missing,Float64}[],
         Aki = String[], conf_i = String[], term_i = String[], J_i = String[],
         conf_k = String[], term_k = String[], J_k = String[],
+        Ei = String[], Ek = String[],
     )
     sp_missing = false
     (isempty(body) || occursin("<html", lowercase(first(body, 300)))) && return rows, sp_missing
@@ -171,7 +173,8 @@ function parse_lines(body, Z, sym)
 
         push!(rows, (Z, sym, ion, wl, medium, kind, inten,
                      extra(:Aki), extra(:conf_i), extra(:term_i), extra(:J_i),
-                     extra(:conf_k), extra(:term_k), extra(:J_k)))
+                     extra(:conf_k), extra(:term_k), extra(:J_k),
+                     extra(:Ei), extra(:Ek)))
     end
     return rows, sp_missing
 end

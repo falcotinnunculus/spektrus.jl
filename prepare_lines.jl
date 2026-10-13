@@ -34,7 +34,7 @@ function air2vac(λair)
 end
 
 str_cols = Dict(c => String for c in
-    [:Aki, :conf_i, :term_i, :J_i, :conf_k, :term_k, :J_k, :medium, :kind, :symbol])
+    [:Aki, :conf_i, :term_i, :J_i, :conf_k, :term_k, :J_k, :Ei, :Ek, :medium, :kind, :symbol])
 df = CSV.read(IN, DataFrame; types = str_cols)
 
 println("Rozkład medium w lines.csv:")
@@ -50,8 +50,36 @@ out = combine(groupby(df, [:Z, :ion, :wl_vac_nm])) do sdf
     i = argmax(sdf.intensity)
     (symbol = sdf.symbol[i], intensity = sdf.intensity[i], Aki = sdf.Aki[i],
      conf_i = sdf.conf_i[i], term_i = sdf.term_i[i], J_i = sdf.J_i[i],
-     conf_k = sdf.conf_k[i], term_k = sdf.term_k[i], J_k = sdf.J_k[i])
+     conf_k = sdf.conf_k[i], term_k = sdf.term_k[i], J_k = sdf.J_k[i],
+     Ei = sdf.Ei[i], Ek = sdf.Ek[i])
 end
+
+# kolumny liczbowe do modelu LTE: Aki [1/s], Ei/Ek [cm^-1], gk = 2J+1
+function num(s)
+    ismissing(s) && return missing
+    m = match(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", s)
+    v = m === nothing ? nothing : tryparse(Float64, m.match)
+    return v === nothing ? missing : v
+end
+
+function parse_J(s)
+    ismissing(s) && return missing
+    t = strip(s)
+    if occursin('/', t)
+        a = split(t, '/')
+        length(a) == 2 || return missing
+        n = tryparse(Float64, a[1]); d = tryparse(Float64, a[2])
+        (n === nothing || d === nothing || d == 0) && return missing
+        return n / d
+    end
+    x = tryparse(Float64, t)
+    return x === nothing ? missing : x
+end
+
+out.Aki_s  = [num(x) for x in out.Aki]
+out.Ei_cm1 = [num(x) for x in out.Ei]
+out.Ek_cm1 = [num(x) for x in out.Ek]
+out.gk     = [(j = parse_J(x); ismissing(j) ? missing : round(Int, 2j + 1)) for x in out.J_k]
 
 out.log10_int = log10.(out.intensity)
 select!(out, :Z, :symbol, :ion, :wl_vac_nm, :intensity, :log10_int,
