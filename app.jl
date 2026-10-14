@@ -14,7 +14,7 @@
 
 using Bonito, WGLMakie
 include(joinpath(@__DIR__, "spektrus.jl"))
-using .spektrus
+using .Spektrus
 
 WGLMakie.activate!()
 
