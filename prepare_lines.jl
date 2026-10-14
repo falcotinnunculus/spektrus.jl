@@ -1,17 +1,16 @@
 # prepare_lines.jl
-# Czyści lines.csv z fetch_nist_lines.jl do pliku spectrum.csv gotowego do rysowania.
+# Przygotowuje lines.csv (z fetch_nist_lines.jl) do spectrum.csv dla notebooka/aplikacji.
 #
-#   julia prepare_lines.jl
+#   julia --project=. .\prepare_lines.jl
 #
 # Co robi:
-#   1. zostawia tylko linie obserwowane (kind == "obs") z dodatnim natężeniem
-#   2. scala duplikaty (ta sama długość fali, ten sam jon) - bierze wiersz z największym natężeniem
-#      (NIST podaje natężenie na wierszu multipletu, a składowe struktury subtelnej go nie mają)
-#   3. dodaje log10_int, bo natężenia rozciągają się na wiele rzędów wielkości
-#
-# NIST podaje fale w próżni (<200 nm, >2000 nm) i w powietrzu (200-2000 nm).
-# Tu sprowadzamy wszystko do próżni (odwrotna konwersja Edlena/Mortona dla linii "air"),
-# a przełącznik próżnia/powietrze jest w aplikacji.
+#   1. sprowadza wszystkie długości fal do próżni (NIST daje powietrze w zakresie 200-2000 nm;
+#      odwrotna konwersja Edlena/Mortona), przełącznik próżnia/powietrze jest w aplikacji
+#   2. liczy kolumny liczbowe do modelu LTE: Aki_s [1/s], Ei_cm1, Ek_cm1 [cm^-1], gk = 2J+1
+#   3. NIE wyrzuca linii bez natężenia NIST - model LTE ich nie potrzebuje, a wiele linii
+#      (np. składowe struktury subtelnej wodoru) ma Aki i poziomy, ale nie ma natężenia.
+#      Tryb "NIST" w aplikacji filtruje linie bez natężenia sam.
+#   4. nie scala duplikatów długości fal - to robi aplikacja (rozdzielczość)
 
 using CSV, DataFrames
 
@@ -33,28 +32,6 @@ function air2vac(λair)
     return λv
 end
 
-str_cols = Dict(c => String for c in
-    [:Aki, :conf_i, :term_i, :J_i, :conf_k, :term_k, :J_k, :Ei, :Ek, :medium, :kind, :symbol])
-df = CSV.read(IN, DataFrame; types = str_cols)
-
-println("Rozkład medium w lines.csv:")
-println(combine(groupby(df, :medium), nrow => :n))
-df.wl_nm = [m == "air" ? air2vac(w) : w for (w, m) in zip(df.wl_nm, df.medium)]
-
-filter!(r -> r.kind == "obs", df)
-dropmissing!(df, :intensity)
-filter!(r -> r.intensity > 0, df)
-rename!(df, :wl_nm => :wl_vac_nm)
-
-out = combine(groupby(df, [:Z, :ion, :wl_vac_nm])) do sdf
-    i = argmax(sdf.intensity)
-    (symbol = sdf.symbol[i], intensity = sdf.intensity[i], Aki = sdf.Aki[i],
-     conf_i = sdf.conf_i[i], term_i = sdf.term_i[i], J_i = sdf.J_i[i],
-     conf_k = sdf.conf_k[i], term_k = sdf.term_k[i], J_k = sdf.J_k[i],
-     Ei = sdf.Ei[i], Ek = sdf.Ek[i])
-end
-
-# kolumny liczbowe do modelu LTE: Aki [1/s], Ei/Ek [cm^-1], gk = 2J+1
 function num(s)
     ismissing(s) && return missing
     m = match(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", s)
@@ -76,21 +53,39 @@ function parse_J(s)
     return x === nothing ? missing : x
 end
 
-out.Aki_s  = [num(x) for x in out.Aki]
-out.Ei_cm1 = [num(x) for x in out.Ei]
-out.Ek_cm1 = [num(x) for x in out.Ek]
-out.gk     = [(j = parse_J(x); ismissing(j) ? missing : round(Int, 2j + 1)) for x in out.J_k]
+str_cols = Dict(c => String for c in
+    [:Aki, :conf_i, :term_i, :J_i, :conf_k, :term_k, :J_k, :Ei, :Ek, :medium, :kind, :symbol])
+df = CSV.read(IN, DataFrame; types = str_cols)
 
-out.log10_int = log10.(out.intensity)
-select!(out, :Z, :symbol, :ion, :wl_vac_nm, :intensity, :log10_int,
-        Not([:Z, :symbol, :ion, :wl_vac_nm, :intensity, :log10_int]))
-sort!(out, [:Z, :wl_vac_nm])
+println("Rozkład medium w lines.csv:")
+println(combine(groupby(df, :medium), nrow => :n))
 
-CSV.write(OUT, out)
+df.wl_nm = [m == "air" ? air2vac(w) : w for (w, m) in zip(df.wl_nm, df.medium)]
+rename!(df, :wl_nm => :wl_vac_nm)
 
-println("Zapisano $(nrow(out)) linii do $OUT")
-counts = combine(groupby(out, :Z), nrow => :n)
-println("Pierwiastków z liniami: $(nrow(counts)) / 99")
-missingZ = setdiff(1:99, counts.Z)
-isempty(missingZ) || println("Bez żadnych linii z natężeniem: ", join(missingZ, ", "))
-println("Najwięcej linii: ", first(sort(counts, :n, rev = true), 5))
+df.intensity = [(ismissing(x) || x <= 0) ? missing : x for x in df.intensity]
+df.log10_int = [ismissing(x) ? missing : log10(x) for x in df.intensity]
+df.Aki_s     = [num(x) for x in df.Aki]
+df.Ei_cm1    = [num(x) for x in df.Ei]
+df.Ek_cm1    = [num(x) for x in df.Ek]
+df.gk        = [(j = parse_J(x); ismissing(j) ? missing : round(Int, 2j + 1)) for x in df.J_k]
+
+# podsumowanie
+df.has_int = .!ismissing.(df.intensity)
+df.has_lte = completecases(df, [:Aki_s, :Ek_cm1, :gk])
+cnt = combine(groupby(df, :Z), nrow => :wszystkie,
+              :has_int => sum => :z_natezeniem_NIST, :has_lte => sum => :do_modelu_LTE)
+
+select!(df, :Z, :symbol, :ion, :wl_vac_nm, :kind, :intensity, :log10_int,
+        :Aki_s, :Ek_cm1, :Ei_cm1, :gk,
+        :Aki, :conf_i, :term_i, :J_i, :conf_k, :term_k, :J_k)
+sort!(df, [:Z, :wl_vac_nm])
+CSV.write(OUT, df)
+
+println("Zapisano $(nrow(df)) linii do $OUT")
+println("Pierwiastków z liniami: $(nrow(cnt)) / 99")
+no_lte = cnt.Z[cnt.do_modelu_LTE .== 0]
+no_int = cnt.Z[cnt.z_natezeniem_NIST .== 0]
+isempty(no_lte) || println("Bez linii nadających się do modelu LTE: ", join(no_lte, ", "))
+isempty(no_int) || println("Bez natężeń NIST (tryb NIST pusty): ", join(no_int, ", "))
+println("Najwięcej linii: ", first(sort(cnt, :wszystkie, rev = true), 5))

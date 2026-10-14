@@ -66,6 +66,22 @@ begin
         γ = 0.8
         return ((f * r)^γ, (f * g)^γ, (f * b)^γ)
     end
+
+    "Numery klastrów dla posortowanych długości fal: linia należy do klastra, dopóki λ − λ_start <= res."
+    function cluster_ids(λ, res)
+        ids = zeros(Int, length(λ))
+        isempty(λ) && return ids
+        b = 1
+        start = λ[1]
+        for i in eachindex(λ)
+            if λ[i] - start > res
+                b += 1
+                start = λ[i]
+            end
+            ids[i] = b
+        end
+        return ids
+    end
 end
 
 # ╔═╡ 9b1b3791-b66e-4828-9a43-f4d2b9aa7ae7
@@ -92,9 +108,11 @@ md"""
    **Skala natężeń:** $(@bind scale_mode PlutoUI.Select(["log" => "logarytmiczna", "lin" => "liniowa"]))
    $(@bind ion2 PlutoUI.CheckBox(default = false)) pokaż także jony II
 
-**Rozdzielczość** [nm] (0 = wyłączona; linie w jednym przedziale są łączone, natężenia sumowane): $(@bind res PlutoUI.Slider(0:0.1:5; default = 0.0, show_value = true))
+**Rozdzielczość** [nm] (linie bliższe niż to są zlewane w jedną, natężenia sumowane; minimum 0,01 nm): $(@bind res PlutoUI.Slider(0:0.1:5; default = 0.0, show_value = true))
 
-**Próg widoczności** (ile rzędów wielkości poniżej najsilniejszej linii): $(@bind decades PlutoUI.Slider(0.5:0.1:6; default = 4.0, show_value = true))
+**Odniesienie jasności:** $(@bind ref_mode PlutoUI.Select(["visible" => "najsilniejsza linia widzialna (380–780 nm)", "window" => "najsilniejsza linia w oknie", "all" => "najsilniejsza linia pierwiastka"]))
+
+**Próg widoczności** (ile rzędów wielkości poniżej linii odniesienia): $(@bind decades PlutoUI.Slider(0.5:0.1:6; default = 4.0, show_value = true))
 
 **Źródło natężeń:** $(@bind intens_src PlutoUI.Select(["lte" => "model LTE: g·A·ν·exp(−E/kT)", "nist" => "NIST (jednostki umowne)"]))
    **T [K]:** $(@bind temp PlutoUI.Slider(1000:100:10000; default = 6000, show_value = true))
@@ -108,44 +126,61 @@ begin
     λhi = max(hi, lo + 1)
     sub = df[(df.Z .== elem) .& (df.ion .<= (ion2 ? 2 : 1)), :]
     sub = transform(sub, :wl_vac_nm => ByRow(x -> medium == "air" ? vac2air(x) : x) => :λ)
-    if intens_src == "lte" && have_model
-        # emisja optycznie cienka w LTE: g_k * A_ki * nu * exp(-E_k / kT), c2 = hc/k = 1.438777 cm*K
-        sub = dropmissing(sub, [:Aki_s, :Ek_cm1, :gk])
+    # emisja optycznie cienka w LTE: g_k * A_ki * nu * exp(-E_k / kT), c2 = hc/k = 1.438777 cm*K
+    lte_sub = intens_src == "lte" && have_model ? dropmissing(sub, [:Aki_s, :Ek_cm1, :gk]) : sub[1:0, :]
+    use_lte = nrow(lte_sub) > 0         # brak Aki/poziomów (np. Th, U) -> wracamy do natężeń NIST
+    if use_lte
+        sub = lte_sub
         sub.I = [r.gk * r.Aki_s * (1e7 / r.wl_vac_nm) * exp(-1.438777 * r.Ek_cm1 / temp)
                  for r in eachrow(sub)]
         sub = sub[sub.I .> 0, :]
     else
+        sub = dropmissing(sub, :intensity)
         sub.I = sub.intensity
+        sub = sub[sub.I .> 0, :]
     end
-    if res > 0 && nrow(sub) > 0
-        # jak pryzmat/piksel: linie w jednym przedziale o szerokości res zlewają się w jedną,
-        # natężenia sumujemy, a położenie to średnia ważona natężeniem
-        sub.bin = floor.(Int, sub.λ ./ res)
+    # łączenie linii: pryzmat/piksel nie rozdzieli linii bliższych niż rozdzielczość.
+    # Klastry o szerokości <= res liczone od pierwszej linii (bez sztywnej siatki, więc dublet
+    # zawsze zlewa się razem); natężenia sumowane, położenie = średnia ważona natężeniem.
+    res_eff = max(res, 0.01)
+    if nrow(sub) > 0
+        sub = sub[sortperm(sub.λ), :]
+        sub.bin = cluster_ids(sub.λ, res_eff)
         sub = combine(groupby(sub, :bin)) do g
             w = g.I
             k = argmax(w)
+            iv = collect(skipmissing(g.intensity))
             (symbol = g.symbol[k], ion = g.ion[k],
              λ = sum(g.λ .* w) / sum(w), wl_vac_nm = sum(g.wl_vac_nm .* w) / sum(w),
-             I = sum(w), n_linii = nrow(g), intensity = maximum(g.intensity),
+             I = sum(w), n_linii = nrow(g),
+             intensity = isempty(iv) ? missing : maximum(iv),
              Aki = g.Aki[k], conf_i = g.conf_i[k], term_i = g.term_i[k], J_i = g.J_i[k],
              conf_k = g.conf_k[k], term_k = g.term_k[k], J_k = g.J_k[k])
         end
     else
-        sub.n_linii = ones(Int, nrow(sub))
+        sub.n_linii = Int[]
     end
     inwin = sub[(sub.λ .>= λlo) .& (sub.λ .<= λhi), :]
-    lmin, lmax = isempty(sub) ? (0.0, 1.0) : extrema(log10.(sub.I))
-    imax = isempty(sub) ? 1.0 : maximum(sub.I)
+    # linia odniesienia dla skali jasności (oko nie widzi UV, więc domyślnie: widzialny zakres)
+    refset = ref_mode == "all" ? sub :
+             ref_mode == "window" ? inwin :
+             sub[(sub.λ .>= 380) .& (sub.λ .<= 780), :]
+    if isempty(refset)
+        refset = sub
+    end
+    lmin, lmax = isempty(refset) ? (0.0, 1.0) : extrema(log10.(refset.I))
+    imax = isempty(refset) ? 1.0 : maximum(refset.I)
     cutoff = lmax - decades                       # próg w skali log10
     vis = inwin[log10.(inwin.I) .>= cutoff, :]
     relheight(I) = scale_mode == "log" ?
-        clamp((log10(I) - cutoff) / decades, 0.04, 1.0) : I / imax
+        clamp((log10(I) - cutoff) / decades, 0.04, 1.0) : min(I / imax, 1.0)
     nothing
 end
 
 # ╔═╡ fc11e62f-5c5a-40cc-ae64-71d9f7117dbd
 begin
-    src_label = intens_src == "lte" ? "model LTE (T = $(temp) K)" : "NIST"
+    src_label = use_lte ? "model LTE (T = $(temp) K)" :
+        (intens_src == "lte" ? "NIST (brak Aki dla tego pierwiastka, LTE niedostępny)" : "NIST")
     Markdown.parse("Widocznych linii: **$(nrow(vis))** z $(nrow(inwin)) w zakresie " *
         "(łącznie dla pierwiastka: $(nrow(sub))). Źródło natężeń: **$(src_label)**; " *
         "zakres $(round(10^lmin; sigdigits = 2)) – $(round(10^lmax; sigdigits = 2)) (jednostki względne).")
