@@ -35,7 +35,7 @@ jobs:
 
       - name: Export Bonito App
         run: |
-          julia --project=. app.jl  # Zmień na nazwę swojego pliku eksportującego
+          julia --project=. deploy.jl  # Zmień na nazwę swojego pliku eksportującego
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
