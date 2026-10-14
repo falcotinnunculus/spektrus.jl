@@ -3,7 +3,7 @@ name: Deploy Bonito App to GitHub Pages
 on:
   push:
     branches:
-      - master  # Upewnij się, czy Twoja główna gałąź to 'main' czy 'master'
+      - master  # lub master
 
 permissions:
   contents: read
@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-running: true
+  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
@@ -35,7 +35,7 @@ jobs:
 
       - name: Export Bonito App
         run: |
-          julia --project=. deploy.jl # Lub podaj nazwę Twojego pliku .jl z kodem
+          julia --project=. app.jl  # Zmień na nazwę swojego pliku eksportującego
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
