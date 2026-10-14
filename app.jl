@@ -13,8 +13,8 @@
 # przeciągnięcie prawym = przesuwanie, przyciski UV/widzialne/IR/wszystko = zakres.
 
 using Bonito, WGLMakie
-include(joinpath(@__DIR__, "Spektrus.jl"))
-using .Spektrus
+include(joinpath(@__DIR__, "spektrus.jl"))
+using .spektrus
 
 WGLMakie.activate!()
 
