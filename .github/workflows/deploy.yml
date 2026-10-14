@@ -1,0 +1,50 @@
+name: Deploy Bonito App to GitHub Pages
+
+on:
+  push:
+    branches:
+      - master  # Upewnij się, czy Twoja główna gałąź to 'main' czy 'master'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-running: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      - name: Cache dependencies
+        uses: julia-actions/cache@v2
+
+      - name: Build project dependencies
+        run: |
+          julia --project=. -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Export Bonito App
+        run: |
+          julia --project=. deploy.jl # Lub podaj nazwę Twojego pliku .jl z kodem
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'public'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -280,3 +280,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
         e isa InterruptException || rethrow()
     end
 end
+
+export_static("public", app)
+println("Wyeksportowano aplikację do folderu public/")
