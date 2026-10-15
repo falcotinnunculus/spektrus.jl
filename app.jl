@@ -88,13 +88,21 @@ function build_app()
         scale_dd = Bonito.Dropdown(["logarytmiczna", "liniowa"])
         src_dd   = Bonito.Dropdown(["model LTE", "NIST"])
         ref_dd   = Bonito.Dropdown(["linia widzialna", "linia w oknie", "linia pierwiastka"])
-        ion_cb   = Bonito.Checkbox(false)
+        ion1_cb  = Bonito.Checkbox(true)                     # linie niezjonizowane (I)
+        ion2_cb  = Bonito.Checkbox(false)                    # linie zjonizowane (II)
+        bw_cb    = Bonito.Checkbox(false)                    # tryb czarno-biały
         T_sl     = Bonito.Slider(1000:100:10000; value = 6000)
         res_sl   = Bonito.Slider(0.0:0.1:5.0; value = 0.0)
         thr_sl   = Bonito.Slider(0.5:0.1:6.0; value = 4.0)
         rescb    = Bonito.Checkbox(false)                    # rozdzielczość zależna od zoomu
         px_sl    = Bonito.Slider(1:10; value = 2)            # ... w pikselach ekranu
         btns     = [Bonito.Button(name) for (name, _) in RANGES]
+        b_left   = Bonito.Button("◀")
+        b_right  = Bonito.Button("▶")
+        b_zin    = Bonito.Button("＋")
+        b_zout   = Bonito.Button("－")
+        about_btn = Bonito.Button("ⓘ O programie")
+        about_open = Observable(false)
 
         info  = Observable("")
         hover = Observable("Najedź kursorem na linię.")
@@ -157,12 +165,15 @@ function build_app()
                           ref_dd.value[] == "linia pierwiastka" ? "all" : "visible"
                 T       = Float64(T_sl.value[])
                 decades = Float64(thr_sl.value[])
-                ion2    = ion_cb.value[]
+                ions    = Int[]
+                ion1_cb.value[] && push!(ions, 1)
+                ion2_cb.value[] && push!(ions, 2)
+                bw      = bw_cb.value[]
                 logmode = xs_dd.value[] == "logarytmiczna"
 
-                key = (Z, ion2, medium, source, T)
+                key = (Z, Tuple(ions), medium, source, T)
                 if cache[] === nothing || cache[].key != key
-                    spec = prepare_lines(DF, Z; ion2 = ion2, medium = medium, source = source, T = T)
+                    spec = prepare_lines(DF, Z; ions = ions, medium = medium, source = source, T = T)
                     cache[] = (key = key, spec = spec)
                 end
                 lines   = cache[].spec.lines
@@ -206,7 +217,7 @@ function build_app()
                     pts2 = Point2f[]; col2 = RGBAf[]
                     for k in idx
                         h = line_height(cl.I[k], Iref, decades; scale = scale)
-                        (cr, cg, cb) = wl2rgb(cl.λ[k])
+                        (cr, cg, cb) = bw ? (1.0, 1.0, 1.0) : wl2rgb(cl.λ[k])
                         a = 0.15 + 0.85 * h
                         push!(pts1, Point2f(cl.λ[k], 0), Point2f(cl.λ[k], 1))
                         push!(col1, RGBAf(cr, cg, cb, a), RGBAf(cr, cg, cb, a))
@@ -223,7 +234,8 @@ function build_app()
                 ylims!(ax_strip, 0, 1)
 
                 shown[] = (λ = cl.λ[idx], rows = cl.rows[idx], n = cl.n[idx], lines = lines)
-                src_txt = use_lte ? "model LTE, T = $(Int(T)) K" :
+                src_txt = isempty(lines.I) ? "brak linii (zaznacz stopień jonizacji)" :
+                          use_lte ? "model LTE, T = $(Int(T)) K" :
                           (source == "lte" ? "NIST (brak Aki dla tego pierwiastka, LTE niedostępny)" : "NIST")
                 info[] = "Linie widoczne: $(length(idx)) z $(length(cl.λ)) (całe widmo)   ·   " *
                          "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))   ·   " *
@@ -236,8 +248,60 @@ function build_app()
 
         # ---------------- reakcje ----------------
         onany(elem_dd.value, med_dd.value, xs_dd.value, scale_dd.value, src_dd.value, ref_dd.value,
-              ion_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
+              ion1_cb.value, ion2_cb.value, bw_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
             redraw!()
+        end
+
+        # powiększanie/pomniejszanie (factor) i przesuwanie (shift, ułamek nowej szerokości okna);
+        # w skali logarytmicznej liczymy w log10, więc zachowujemy stosunek hi/lo
+        function move_view!(factor, shift)
+            logm = log_x[]
+            t  = logm ? log10 : identity
+            ti = logm ? (x -> 10.0^x) : identity
+            lo, hi = view_x[]
+            a0 = t(max(lo, logm ? X_MIN_LOG : X_MIN))
+            b0 = t(hi)
+            w  = (b0 - a0) * factor
+            a  = (a0 + b0) / 2 - w / 2 + shift * w
+            view_x[] = clamp_view(ti(a), ti(a + w), logm)
+            redraw!()
+        end
+        on(b_zin.value) do _
+            move_view!(0.5, 0.0)
+        end
+        on(b_zout.value) do _
+            move_view!(2.0, 0.0)
+        end
+        on(b_left.value) do _
+            move_view!(1.0, -0.25)
+        end
+        on(b_right.value) do _
+            move_view!(1.0, 0.25)
+        end
+
+        # okno „O programie” (przełączane przyciskiem)
+        on(about_btn.value) do _
+            about_open[] = !about_open[]
+        end
+        about_panel = map(about_open) do o
+            o || return Bonito.DOM.div()
+            Bonito.DOM.div(
+                Bonito.DOM.h3("Spektruś.jl"; style = "margin:0 0 6px 0;"),
+                Bonito.DOM.p("Odtworzenie programu Spektruś 1.0 (Mikołaj Pytel, 2002) w Julii. " *
+                             "Pokazuje widma emisyjne pierwiastków 1–99 w UV, świetle widzialnym i podczerwieni."),
+                Bonito.DOM.p("Dane linii spektralnych: ", Bonito.DOM.b("NIST Atomic Spectra Database"),
+                             " (jony I–II, 100–2500 nm). Prosimy cytować: A. Kramida, Yu. Ralchenko, J. Reader " *
+                             "i NIST ASD Team, NIST Atomic Spectra Database, ",
+                             Bonito.DOM.a("https://physics.nist.gov/asd"; href = "https://physics.nist.gov/asd",
+                                          target = "_blank", style = "color:#8cf;"), "."),
+                Bonito.DOM.p("Natężenia: model LTE, emisja optycznie cienka, I ∝ g_k·A_ki·ν·exp(−E_k/kT) " *
+                             "(temperatura z suwaka T). Model nie uwzględnia równowagi jonizacji (Saha), więc " *
+                             "względne jasności linii różnych stopni jonizacji nie mają sensu fizycznego; " *
+                             "w obrębie jednego stopnia są porównywalne."),
+                Bonito.DOM.p("Obsługa: kółko myszy = zoom, przeciągnięcie lewym = zaznaczenie obszaru, " *
+                             "prawym = przesuwanie; przyciski ◀ ▶ ＋ － działają bez myszy.");
+                style = "max-width:760px;margin:8px 0;padding:10px 14px;background:#222228;" *
+                        "border:1px solid #444;border-radius:6px;font-size:0.92em;line-height:1.4;")
         end
 
         for (b, (_, (lo, hi))) in zip(btns, RANGES)
@@ -308,9 +372,17 @@ function build_app()
             Bonito.DOM.h2("Spektruś.jl"; style = "margin:0 0 10px 0;"),
             row(lab("Pierwiastek:", elem_dd),
                 lab("Zakres:", btns...),
+                lab("Widok:", b_left, b_right, b_zin, b_zout),
                 lab("Długość fali:", med_dd),
-                lab("Skala λ:", xs_dd),
-                lab("jony II", ion_cb)),
+                lab("Skala λ:", xs_dd)),
+            row(Bonito.DOM.span("Rysuj linie:"),
+                lab("niezjonizowane (I)", ion1_cb),
+                lab("zjonizowane (II)", ion2_cb),
+                Bonito.DOM.span("☐ podwójnie, potrójnie, poczwórnie zjonizowane (III–V; wymagają pobrania danych z NIST)";
+                                style = "opacity:0.4;"),
+                lab("czarno-białe", bw_cb),
+                about_btn),
+            Bonito.DOM.div(about_panel),
             row(lab("Źródło natężeń:", src_dd),
                 lab("T [K]:", T_sl, val(T_sl.value)),
                 lab("Skala natężeń:", scale_dd),
