@@ -22,7 +22,8 @@ WGLMakie.activate!()
 const X_MIN       = 0.0       # dolna granica [nm], skala liniowa
 const X_MIN_LOG   = 10.0      # dolna granica [nm], skala logarytmiczna (log(0) nie istnieje)
 const X_MAX       = 3000.0    # górna granica [nm]; dane NIST sięgają 2500 nm
-const X_MIN_WIDTH = 0.05      # najwęższe okno [nm] w skali liniowej (w logarytmicznej: 0,002 dekady)
+const X_MIN_WIDTH = 0.002     # najwęższe okno [nm] w skali liniowej (w logarytmicznej: 0,002 dekady)
+const RES_FLOOR   = 1e-4      # najmniejsza rozdzielczość zlewania linii [nm] (linie bliższe niż to uznajemy za tę samą)
 
 const DF       = load_data()
 const ELEMENTS = element_list(DF)
@@ -44,7 +45,9 @@ function clamp_view(lo, hi, logmode)
     amin = t(logmode ? X_MIN_LOG : X_MIN)
     amax = t(X_MAX)
     a = t(lo)
-    w = clamp(t(hi) - a, logmode ? 0.002 : X_MIN_WIDTH, amax - amin)
+    b = t(hi)
+    w = clamp(b - a, logmode ? 0.002 : X_MIN_WIDTH, amax - amin)
+    a = (a + b) / 2 - w / 2        # przy korekcie szerokości zachowaj środek okna (inaczej zoom ponad limit przesuwa widok)
     if a < amin
         a = amin
     end
@@ -55,9 +58,12 @@ function clamp_view(lo, hi, logmode)
 end
 
 # etykiety osi λ jako zwykłe liczby (100 zamiast 10², 1000 zamiast 10³)
-fmt_nm(vals) = [let r = round(v; sigdigits = 6)
-                    isinteger(r) ? string(Int(r)) : string(r)
-                end for v in vals]
+function fmt_nm(vals)
+    v = collect(Float64, vals)
+    # liczba miejsc po przecinku z najmniejszego odstępu między tickami (żeby przy dużym zoomie się nie dublowały)
+    d = length(v) >= 2 && minimum(abs.(diff(v))) > 0 ? clamp(ceil(Int, -log10(minimum(abs.(diff(v))))), 0, 8) : 3
+    return [d == 0 ? string(round(Int, x)) : string(round(x; digits = d)) for x in v]
+end
 
 # "ładne" ticki osi λ dla okna [lo, hi] nm: 400, 500, 600... (liniowo lub 1-2-5 w skali log).
 # Zwraca samą listę wartości (etykiety robi xtickformat = fmt_nm).
@@ -287,13 +293,13 @@ function build_app()
                 x0, x1 = clamp_view(view_x[]..., logmode)
                 view_x[] = (x0, x1)
 
-                res = max(Float64(res_sl.value[]), 0.01)
+                res = max(Float64(res_sl.value[]), RES_FLOOR)
                 if rescb.value[]
                     # rozdzielczość = px_sl pikseli ekranu przy bieżącym powiększeniu
                     wpx = max(Float64(ax.scene.viewport[].widths[1]), 200.0)
                     px  = Float64(px_sl.value[])
                     res = max(logmode ? px * log(x1 / x0) / wpx * sqrt(x0 * x1) :
-                                        px * (x1 - x0) / wpx, 0.01)
+                                        px * (x1 - x0) / wpx, RES_FLOOR)
                 end
                 cl = cluster_window(lines, -Inf, Inf, res)
                 lap("cluster_window ($(length(lines.I)) linii)")
@@ -332,7 +338,7 @@ function build_app()
                 ylims!(ax_strip, 0, 1)
                 lap("limity i ticki")
 
-                shown[] = (λ = cl.λ[idx], I = cl.I[idx], Iref = Iref, rows = cl.rows[idx], n = cl.n[idx], lines = lines)
+                shown[] = (λ = cl.λ[idx], I = cl.I[idx], Iref = Iref, rows = cl.rows[idx], n = cl.n[idx], spread = cl.spread[idx], lines = lines)
                 frac = cache[].spec.fractions
                 saha_txt = frac === nothing ? "" :
                     ", Saha: lg n_e = $(round(ne_exp; digits = 1)), udziały " *
@@ -484,7 +490,7 @@ function build_app()
             cand = [i for i in (k - 1, k) if 1 <= i <= length(λs)]
             i = cand[argmin([abs(t(λs[j]) - t(mx)) for j in cand])]
             if abs(t(λs[i]) - t(mx)) <= tol
-                set_hover!(describe_line(s.lines, s.rows[i]; n = s.n[i]))
+                set_hover!(describe_line(s.lines, s.rows[i]; n = s.n[i], spread = s.spread[i]))
                 set_summary!("$(lines_pl(s.n[i])) o względnej sumie natężeń $(fmt_rel(100 * s.I[i] / s.Iref))",
                              s.n[i] > 1 ? "Możesz zaznaczyć i powiększyć ten wycinek w celu zwiększenia rozdzielczości." : "")
             else

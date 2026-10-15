@@ -239,7 +239,8 @@ end
 """
 Zlewa linie z okna [λlo, λhi] leżące bliżej niż `res` [nm] (jak pryzmat lub piksel).
 Natężenia są sumowane, położenie to średnia ważona natężeniem.
-Zwraca (λ, I, n, rows): `rows` to indeksy najsilniejszej linii każdego klastra w `lines`.
+Zwraca (λ, I, n, rows, spread): `rows` to indeksy najsilniejszej linii każdego klastra w `lines`,
+`spread` to rozrzut długości fal linii w klastrze [nm].
 """
 function cluster_window(lines, λlo, λhi, res)
     idx = findall(x -> λlo <= x <= λhi, lines.λ)
@@ -248,17 +249,19 @@ function cluster_window(lines, λlo, λhi, res)
     ids = cluster_ids(λ, res)
     nc = isempty(ids) ? 0 : maximum(ids)
     Ic = zeros(nc); λw = zeros(nc); n = zeros(Int, nc); best = zeros(Int, nc)
+    lmin = fill(Inf, nc); lmax = fill(-Inf, nc)
     for j in eachindex(ids)
         c = ids[j]
         Ic[c] += I[j]
         λw[c] += λ[j] * I[j]
         n[c] += 1
+        lmin[c] = min(lmin[c], λ[j]); lmax[c] = max(lmax[c], λ[j])
         if best[c] == 0 || I[j] > I[best[c]]
             best[c] = j
         end
     end
     λw ./= Ic
-    return (; λ = λw, I = Ic, n = n, rows = idx[best])
+    return (; λ = λw, I = Ic, n = n, rows = idx[best], spread = lmax .- lmin)
 end
 
 """
@@ -291,12 +294,13 @@ end
 fmt(x) = ismissing(x) ? "?" : string(x)
 
 "Opis linii do podpowiedzi: pierwiastek, λ, przejście, Aki. `n` > 1 oznacza zlane linie."
-function describe_line(lines, row; n = 1)
+function describe_line(lines, row; n = 1, spread = 0.0)
     r = lines[row, :]
     ion = ("I", "II", "III", "IV", "V")[clamp(r.ion, 1, 5)]
     lower = join(fmt.([r.conf_i, r.term_i, r.J_i]), " ")
     upper = join(fmt.([r.conf_k, r.term_k, r.J_k]), " ")
-    extra = n > 1 ? "  (zlane linie: $n)" : ""
+    spr = spread == 0 ? "0" : string(round(spread; sigdigits = 2))
+    extra = n > 1 ? "  (zlane linie: $n, rozrzut λ: $spr nm)" : ""
     return "$(r.symbol) $ion  $(round(r.λ; digits = 3)) nm   $lower → $upper   Aki = $(fmt(r.Aki)) s⁻¹$extra"
 end
 
