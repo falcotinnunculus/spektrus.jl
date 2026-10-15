@@ -79,6 +79,16 @@ function nice_ticks(lo, hi, logmode)
     return vals
 end
 
+# „1 linia spektralna”, „2 linie spektralne”, „5 linii spektralnych”
+function lines_pl(n)
+    n == 1 && return "1 linia spektralna"
+    (2 <= n % 10 <= 4 && !(12 <= n % 100 <= 14)) && return "$n linie spektralne"
+    return "$n linii spektralnych"
+end
+
+# względna suma natężeń: liczba całkowita od 10 wzwyż, poniżej 2 cyfry znaczące
+fmt_rel(v) = v >= 10 ? string(round(Int, v)) : string(round(v; sigdigits = 2))
+
 function build_app()
     return Bonito.App() do session
         # ---------------- kontrolki ----------------
@@ -106,6 +116,8 @@ function build_app()
 
         info  = Observable("")
         hover = Observable("Najedź kursorem na linię.")
+        summary = Observable("")      # „N linii spektralnych o względnej sumie natężeń X”
+        hint    = Observable("")      # podpowiedź o zaznaczaniu i powiększaniu
 
         # ---------------- wykres ----------------
         fig = Figure(size = (1100, 520), backgroundcolor = RGBf(0.09, 0.09, 0.11))
@@ -207,6 +219,11 @@ function build_app()
 
         # przypisuj podpowiedź tylko, gdy tekst się zmienił (Observable rozsyła każde przypisanie)
         set_hover!(txt) = (hover[] == txt || (hover[] = txt); nothing)
+        function set_summary!(sum_txt, hint_txt)
+            summary[] == sum_txt || (summary[] = sum_txt)
+            hint[] == hint_txt || (hint[] = hint_txt)
+            return nothing
+        end
 
         function redraw!()
             t_start = time(); tmark[] = t_start
@@ -298,7 +315,7 @@ function build_app()
                 ylims!(ax_strip, 0, 1)
                 lap("limity i ticki")
 
-                shown[] = (λ = cl.λ[idx], rows = cl.rows[idx], n = cl.n[idx], lines = lines)
+                shown[] = (λ = cl.λ[idx], I = cl.I[idx], Iref = Iref, rows = cl.rows[idx], n = cl.n[idx], lines = lines)
                 src_txt = isempty(lines.I) ? "brak linii (zaznacz stopień jonizacji)" :
                           use_lte ? "model LTE, T = $(Int(T)) K" :
                           (source == "lte" ? "NIST (brak Aki dla tego pierwiastka, LTE niedostępny)" : "NIST")
@@ -407,6 +424,7 @@ function build_app()
             λs = s.λ
             if isempty(λs)
                 set_hover!("Brak widocznych linii.")
+                set_summary!("", "")
                 return
             end
             mraw = mouseposition(ax.scene)[1]
@@ -422,8 +440,11 @@ function build_app()
             i = cand[argmin([abs(t(λs[j]) - t(mx)) for j in cand])]
             if abs(t(λs[i]) - t(mx)) <= tol
                 set_hover!(describe_line(s.lines, s.rows[i]; n = s.n[i]))
+                set_summary!("$(lines_pl(s.n[i])) o względnej sumie natężeń $(fmt_rel(100 * s.I[i] / s.Iref))",
+                             s.n[i] > 1 ? "Możesz zaznaczyć i powiększyć ten wycinek w celu zwiększenia rozdzielczości." : "")
             else
                 set_hover!("Najedź kursorem na linię.")
+                set_summary!("", "")
             end
         end
 
@@ -501,7 +522,12 @@ function build_app()
                 lab("lub zależna od zoomu [px]:", rescb, px_sl, val(px_sl.value))),
             Bonito.DOM.div(fig),
             Bonito.DOM.div(info; style = "margin-top:6px;color:#9aa;"),
-            Bonito.DOM.div(hover; style = "margin-top:4px;font-family:monospace;min-height:1.5em;");
+            Bonito.DOM.div(
+                Bonito.DOM.div("Opis linii spektralnych"; style = "font-weight:600;margin-bottom:4px;color:#9ab;"),
+                Bonito.DOM.div(summary; style = "min-height:1.4em;"),
+                Bonito.DOM.div(hover; style = "font-family:monospace;color:#bbb;min-height:1.4em;margin-top:2px;"),
+                Bonito.DOM.div(hint; style = "color:#889;font-size:0.9em;min-height:1.2em;margin-top:2px;");
+                style = "margin-top:8px;padding:8px 12px;border:1px solid #444;border-radius:6px;");
             style = "background:#161618;color:#ddd;font-family:system-ui,sans-serif;padding:14px;min-height:100vh;")
     end
 end
