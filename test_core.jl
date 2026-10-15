@@ -1,65 +1,210 @@
-# test_core.jl - szybki test rdzenia na prawdziwych danych.
-#   julia --project=. .\test_core.jl
-# Wymaga spectrum.csv (po prepare_lines.jl) i Spektrus.jl w tym samym folderze.
+# fetch_nist_lines.jl
+# Pobiera linie emisyjne pierwiastkow 1-99 (stopnie jonizacji I-V) z NIST ASD
+# i sklada je w jeden plik lines.csv.
+#
+# Instalacja pakietow (raz):
+#   julia -e 'using Pkg; Pkg.add(["HTTP", "CSV", "DataFrames"])'
+#
+# Test na samym wodorze (zacznij od tego!):
+#   julia fetch_nist_lines.jl 1 1
+#   -> w lines.csv powinna byc m.in. linia H-alfa ok. 656.28 nm
+#
+# Pelne pobranie (ok. 99 zapytan, ~2-5 min, wynik jest cache'owany w raw/):
+#   julia fetch_nist_lines.jl
+#
+# Wybrany zakres pierwiastkow:
+#   julia fetch_nist_lines.jl 20 30
+#
+# Dane: NIST Atomic Spectra Database, https://physics.nist.gov/asd
+# Cytowanie: Kramida, Ralchenko, Reader and NIST ASD Team, NIST Atomic Spectra Database.
 
-include("Spektrus.jl")
-using .Spektrus, DataFrames
+using HTTP, CSV, DataFrames
 
-ok = Ref(true)
-function check(name, cond)
-    println(rpad(name, 70), cond ? "OK" : "BŁĄD")
-    cond || (ok[] = false)
+const URL    = "https://physics.nist.gov/cgi-bin/ASD/lines1.pl"
+const RAWDIR = "raw"
+const OUT    = "lines.csv"
+const SPECTRA = "I-V"    # stopnie jonizacji do pobrania (wczesniej I-II)
+const LOW_NM = 100.0     # dolna granica zakresu [nm] (UV)
+const UPP_NM = 2500.0    # gorna granica zakresu [nm] (bliska IR)
+const PAUSE  = 1.0       # przerwa miedzy zapytaniami [s], badzmy grzeczni dla serwera
+
+const SYMBOLS = split("""
+H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn
+Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La
+Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po
+At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es
+""")
+@assert length(SYMBOLS) == 99
+
+# --- pomocnicze -------------------------------------------------------------
+
+clean(s) = strip(replace(String(s), r"[\"=]" => ""))
+
+function num(s)
+    m = match(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", s)
+    m === nothing ? missing : parse(Float64, m.match)
 end
-sumI(lines, λ0; win = 0.5) = sum(lines.I[abs.(lines.λ .- λ0) .<= win]; init = 0.0)
 
-df = load_data()
-println("Wczytano $(nrow(df)) linii\n")
-
-check("vac2air: H-α próżnia 656.4696 → powietrze 656.288", abs(vac2air(656.4696) - 656.2883) < 0.001)
-check("vac2air: poniżej 200 nm bez zmian", vac2air(150.0) == 150.0)
-
-# --- sód ---
-na = prepare_lines(df, 11; source = "lte", T = 6000.0)
-check("Na: tryb LTE aktywny", na.use_lte)
-vis = na.lines[(na.lines.λ .>= 380) .& (na.lines.λ .<= 780), :]
-top = vis[argmax(vis.I), :]
-check("Na: najsilniejsza linia widzialna to D2 (588.995 nm)", abs(top.λ - 588.995) < 0.02)
-Iref = reference_intensity(na.lines, 380, 780)
-check("Na: linia odniesienia (visible) = D2", Iref == top.I)
-check("Na: wysokość linii odniesienia = 1", line_height(Iref, Iref, 4.0) == 1.0)
-check("Na: linia 4 dekady niżej = minimalna wysokość 0.04", line_height(Iref * 1e-4, Iref, 4.0) == 0.04)
-
-w1 = cluster_window(na.lines, 588.5, 590.0, 1.0)
-w2 = cluster_window(na.lines, 588.5, 590.0, 0.2)
-c1 = argmax(w1.I)
-check("Na: dublet D zlewa się przy 1 nm (suma > pojedyncza linia)", maximum(w1.I) > maximum(w2.I))
-check("Na: zlana kreska leży między D2 a D1 (588.995–589.592)", 588.995 < w1.λ[c1] < 589.592)
-check("Na: przy 0.2 nm D1 i D2 są osobno", length(w2.λ) >= 2)
-
-# --- wodór ---
-h = prepare_lines(df, 1; source = "lte", T = 6000.0)
-check("H: tryb LTE aktywny (są składowe z J i Aki)", h.use_lte)
-Ha, Hb, Hg = sumI(h.lines, 656.28), sumI(h.lines, 486.13), sumI(h.lines, 434.05)
-check("H: dekrement Balmera Hα > Hβ > Hγ > 0", Ha > Hb > Hg > 0)
-check("H: Hα/Hβ w LTE 6000 K między 4 a 15 (wyszło $(round(Ha / Hb; digits = 1)))", 4 < Ha / Hb < 15)
-
-# --- powrót do NIST i pierwiastki specjalne ---
-for (Z, nm) in [(90, "Th"), (92, "U")]
-    r = prepare_lines(df, Z; source = "lte")
-    check("$nm: brak Aki → natężenia NIST (use_lte == false, są linie)", !r.use_lte && nrow(r.lines) > 0)
+function build_query(sym)
+    # Parametry formularza lines1.pl; format=3 -> tabulatory.
+    # (Spisane z pamieci - jesli NIST zmienil formularz, tu trzeba poprawic.)
+    return [
+        "spectra"      => "$sym $SPECTRA",
+        "low_w"        => string(LOW_NM),
+        "upp_w"        => string(UPP_NM),
+        "unit"         => "1",          # nm
+        "submit"       => "Retrieve Data",
+        "format"       => "3",          # tab-delimited
+        "line_out"     => "0",          # wszystkie linie (filtrujemy sami)
+        "en_unit"      => "0",
+        "output"       => "0",          # calosc, bez stronicowania
+        "bibrefs"      => "1",
+        "page_size"    => "15",
+        "show_obs_wl"  => "1",
+        "show_calc_wl" => "1",
+        "order_out"    => "0",
+        "max_low_enrg" => "",
+        "show_av"      => "2",          # proznia <200 nm, powietrze 200-2000 nm, proznia >2000 nm
+        "max_upp_enrg" => "",
+        "tsb_value"    => "0",
+        "min_str"      => "",
+        "A_out"        => "0",
+        "f_out"        => "on",
+        "intens_out"   => "on",
+        "max_str"      => "",
+        "allowed_out"  => "1",
+        "forbid_out"   => "1",
+        "min_accur"    => "",
+        "min_intens"   => "",
+        "conf_out"     => "on",
+        "term_out"     => "on",
+        "enrg_out"     => "on",
+        "J_out"        => "on",
+    ]
 end
-fr = prepare_lines(df, 87; source = "lte")
-check("Fr: LTE działa mimo braku natężeń NIST", fr.use_lte && nrow(fr.lines) > 0)
-check("Fr: tryb NIST pusty (brak natężeń)", nrow(prepare_lines(df, 87; source = "nist").lines) == 0)
 
-# --- wszystkie pierwiastki dają coś do narysowania ---
-els = element_list(df)
-empty_els = [r.Z for r in eachrow(els) if nrow(prepare_lines(df, r.Z; source = "lte").lines) == 0]
-check("Każdy z $(nrow(els)) pierwiastków ma linie do narysowania (LTE lub NIST)", isempty(empty_els))
-isempty(empty_els) || println("   puste: ", empty_els)
+function fetch_raw(Z, sym)
+    path = joinpath(RAWDIR, "$(lpad(Z, 2, '0'))_$(sym)_$(SPECTRA).txt")   # inna nazwa niz przy I-II, wiec stary cache nie przeszkadza
+    isfile(path) && return read(path, String)
+    local body = ""
+    for attempt in 1:3
+        try
+            resp = HTTP.get(URL; query = build_query(sym), readtimeout = 300, retry = false)
+            body = String(resp.body)
+            break
+        catch e
+            @warn "Blad zapytania dla $sym (proba $attempt)" exception = e
+            sleep(3attempt)
+        end
+    end
+    isempty(body) && return ""
+    write(path, body)
+    sleep(PAUSE)
+    return body
+end
 
-# --- opis linii ---
-println("\nPrzykład opisu: ", describe_line(na.lines, findfirst(==(top.λ), na.lines.λ)))
+# --- parsowanie -------------------------------------------------------------
 
-println(ok[] ? "\nWszystkie testy przeszły." : "\nSą błędy.")
-exit(ok[] ? 0 : 1)
+const KEEP_TEXT = [
+    "Aki(s^-1)" => :Aki,
+    "conf_i" => :conf_i, "term_i" => :term_i, "J_i" => :J_i,
+    "conf_k" => :conf_k, "term_k" => :term_k, "J_k" => :J_k,
+    "Ei(cm-1)" => :Ei, "Ek(cm-1)" => :Ek,
+]
+
+function read_header(line)
+    header = [clean(h) for h in split(line, '\t')]
+    findcol(prefix) = findfirst(h -> startswith(h, prefix), header)
+    return (header = header,
+            obs = findcol("obs_wl"), ritz = findcol("ritz_wl"),
+            int = findcol("intens"), sp = findcol("sp_num"),
+            extra = Dict(key => findfirst(==(name), header) for (name, key) in KEEP_TEXT))
+end
+
+# NIST powtarza wiersz naglowka przy zmianie osrodka (proznia/powietrze),
+# wiec trzeba go czytac od nowa za kazdym razem.
+is_header(l) = occursin(r"^(element|obs_|ritz_)", l)
+
+function parse_lines(body, Z, sym)
+    rows = DataFrame(
+        Z = Int[], symbol = String[], ion = Int[],
+        wl_nm = Float64[], medium = String[], kind = String[],
+        intensity = Union{Missing,Float64}[],
+        Aki = String[], conf_i = String[], term_i = String[], J_i = String[],
+        conf_k = String[], term_k = String[], J_k = String[],
+        Ei = String[], Ek = String[],
+    )
+    sp_missing = false
+    (isempty(body) || occursin("<html", lowercase(first(body, 300)))) && return rows, sp_missing
+
+    H = nothing
+    for l in split(body, '\n')
+        isempty(strip(l)) && continue
+        if is_header(l)
+            H = read_header(l)
+            if H.obs === nothing && H.ritz === nothing
+                @warn "Naglowek bez kolumn z dlugoscia fali (inna jednostka?) - pomijam te wiersze" sym header = H.header
+                H = nothing
+            end
+            continue
+        end
+        H === nothing && continue
+
+        cells = [clean(c) for c in split(l, '\t'; keepempty = true)]
+        n = length(H.header)
+        length(cells) < n && append!(cells, fill("", n - length(cells)))
+
+        wl = H.obs === nothing ? missing : num(cells[H.obs])
+        kind, cidx = "obs", H.obs
+        if ismissing(wl)
+            wl = H.ritz === nothing ? missing : num(cells[H.ritz])
+            kind, cidx = "ritz", H.ritz
+        end
+        ismissing(wl) && continue
+
+        medium = occursin("vac", H.header[cidx]) ? "vac" : "air"
+        if H.sp === nothing
+            sp_missing = true               # tylko jeden gatunek w odpowiedzi
+            ion = 1
+        else
+            ion = something(tryparse(Int, cells[H.sp]), 1)
+        end
+        inten = H.int === nothing ? missing : num(cells[H.int])
+        extra(key) = (ci = H.extra[key]; ci === nothing ? "" : cells[ci])
+
+        push!(rows, (Z, sym, ion, wl, medium, kind, inten,
+                     extra(:Aki), extra(:conf_i), extra(:term_i), extra(:J_i),
+                     extra(:conf_k), extra(:term_k), extra(:J_k),
+                     extra(:Ei), extra(:Ek)))
+    end
+    return rows, sp_missing
+end
+
+# --- main -------------------------------------------------------------------
+
+function main()
+    zmin = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 1
+    zmax = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 99
+    mkpath(RAWDIR)
+
+    frames = DataFrame[]
+    for Z in zmin:zmax
+        sym = SYMBOLS[Z]
+        body = fetch_raw(Z, sym)
+        df, sp_missing = parse_lines(body, Z, sym)
+        println(rpad("Z=$Z $sym", 12), nrow(df), " linii", sp_missing ? "  (brak sp_num -> ion=1)" : "")
+        nrow(df) > 0 && push!(frames, df)
+    end
+
+    if isempty(frames)
+        @error "Nie udalo sie sparsowac zadnych linii. Zajrzyj do plikow w $RAWDIR/ - pokaz mi ich poczatek."
+        return
+    end
+    all = reduce(vcat, frames)
+    CSV.write(OUT, all)
+    println("\nZapisano $(nrow(all)) linii do $OUT")
+    println(combine(groupby(all, [:medium, :kind]), nrow => :n,
+                    :wl_nm => minimum => :min_nm, :wl_nm => maximum => :max_nm))
+end
+
+main()

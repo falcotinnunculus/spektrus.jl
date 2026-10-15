@@ -1,5 +1,5 @@
 # fetch_nist_lines.jl
-# Pobiera linie emisyjne pierwiastkow 1-99 (stopnie jonizacji I i II) z NIST ASD
+# Pobiera linie emisyjne pierwiastkow 1-99 (stopnie jonizacji I-V) z NIST ASD
 # i sklada je w jeden plik lines.csv.
 #
 # Instalacja pakietow (raz):
@@ -23,6 +23,7 @@ using HTTP, CSV, DataFrames
 const URL    = "https://physics.nist.gov/cgi-bin/ASD/lines1.pl"
 const RAWDIR = "raw"
 const OUT    = "lines.csv"
+const SPECTRA = "I-V"    # stopnie jonizacji do pobrania (wczesniej I-II)
 const LOW_NM = 100.0     # dolna granica zakresu [nm] (UV)
 const UPP_NM = 2500.0    # gorna granica zakresu [nm] (bliska IR)
 const PAUSE  = 1.0       # przerwa miedzy zapytaniami [s], badzmy grzeczni dla serwera
@@ -48,7 +49,7 @@ function build_query(sym)
     # Parametry formularza lines1.pl; format=3 -> tabulatory.
     # (Spisane z pamieci - jesli NIST zmienil formularz, tu trzeba poprawic.)
     return [
-        "spectra"      => "$sym I-II",
+        "spectra"      => "$sym $SPECTRA",
         "low_w"        => string(LOW_NM),
         "upp_w"        => string(UPP_NM),
         "unit"         => "1",          # nm
@@ -83,12 +84,12 @@ function build_query(sym)
 end
 
 function fetch_raw(Z, sym)
-    path = joinpath(RAWDIR, "$(lpad(Z, 2, '0'))_$(sym).txt")
+    path = joinpath(RAWDIR, "$(lpad(Z, 2, '0'))_$(sym)_$(SPECTRA).txt")   # inna nazwa niz przy I-II, wiec stary cache nie przeszkadza
     isfile(path) && return read(path, String)
     local body = ""
     for attempt in 1:3
         try
-            resp = HTTP.get(URL; query = build_query(sym), readtimeout = 120, retry = false)
+            resp = HTTP.get(URL; query = build_query(sym), readtimeout = 300, retry = false)
             body = String(resp.body)
             break
         catch e

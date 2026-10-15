@@ -87,7 +87,13 @@ function lines_pl(n)
 end
 
 # względna suma natężeń: liczba całkowita od 10 wzwyż, poniżej 2 cyfry znaczące
-fmt_rel(v) = v >= 10 ? string(round(Int, v)) : string(round(v; sigdigits = 2))
+fmt_rel(v) = !isfinite(v) ? "∞" : v >= 1e6 ? string(round(v; sigdigits = 3)) :
+             v >= 10 ? string(round(Int, v)) : string(round(v; sigdigits = 2))
+
+const ROMAN = ("I", "II", "III", "IV", "V")
+
+# udział procentowy: pełne procenty od 10% wzwyż, poniżej 2 cyfry znaczące
+fmt_pct(f) = f >= 0.1 ? "$(round(Int, 100f))%" : "$(round(100f; sigdigits = 2))%"
 
 function build_app()
     return Bonito.App() do session
@@ -100,8 +106,13 @@ function build_app()
         ref_dd   = Bonito.Dropdown(["linia widzialna", "linia w oknie", "linia pierwiastka"])
         ion1_cb  = Bonito.Checkbox(true)                     # linie niezjonizowane (I)
         ion2_cb  = Bonito.Checkbox(false)                    # linie zjonizowane (II)
+        ion3_cb  = Bonito.Checkbox(false)                    # podwójnie zjonizowane (III)
+        ion4_cb  = Bonito.Checkbox(false)                    # potrójnie zjonizowane (IV)
+        ion5_cb  = Bonito.Checkbox(false)                    # poczwórnie zjonizowane (V)
+        saha_cb  = Bonito.Checkbox(true)                     # równowaga jonizacji (Saha)
         bw_cb    = Bonito.Checkbox(false)                    # tryb czarno-biały
-        T_sl     = Bonito.Slider(1000:100:10000; value = 6000)
+        T_sl     = Bonito.Slider(1000:100:20000; value = 6000)
+        ne_sl    = Bonito.Slider(12.0:0.5:18.0; value = 15.0)     # lg n_e [cm⁻³] (dla Sahy)
         res_sl   = Bonito.Slider(0.0:0.1:5.0; value = 0.0)
         thr_sl   = Bonito.Slider(0.5:0.1:6.0; value = 4.0)
         rescb    = Bonito.Checkbox(false)                    # rozdzielczość zależna od zoomu
@@ -161,7 +172,7 @@ function build_app()
             last_change[] = stamp
             @async begin
                 sleep(0.2)
-                last_change[] == stamp && redraw!()
+                last_change[] == stamp && request_redraw!()
             end
             return nothing
         end
@@ -240,12 +251,18 @@ function build_app()
                 ions    = Int[]
                 ion1_cb.value[] && push!(ions, 1)
                 ion2_cb.value[] && push!(ions, 2)
+                ion3_cb.value[] && push!(ions, 3)
+                ion4_cb.value[] && push!(ions, 4)
+                ion5_cb.value[] && push!(ions, 5)
+                saha    = saha_cb.value[]
+                ne_exp  = Float64(ne_sl.value[])
                 bw      = bw_cb.value[]
                 logmode = xs_dd.value[] == "logarytmiczna"
 
-                key = (Z, Tuple(ions), medium, source, T)
+                key = (Z, Tuple(ions), medium, source, T, saha, saha ? ne_exp : 0.0)
                 if cache[] === nothing || cache[].key != key
-                    spec = prepare_lines(DF, Z; ions = ions, medium = medium, source = source, T = T)
+                    spec = prepare_lines(DF, Z; ions = ions, medium = medium, source = source, T = T,
+                                         saha = saha, ne = 10.0^ne_exp)
                     cache[] = (key = key, spec = spec)
                 end
                 lines   = cache[].spec.lines
@@ -316,8 +333,12 @@ function build_app()
                 lap("limity i ticki")
 
                 shown[] = (λ = cl.λ[idx], I = cl.I[idx], Iref = Iref, rows = cl.rows[idx], n = cl.n[idx], lines = lines)
-                src_txt = isempty(lines.I) ? "brak linii (zaznacz stopień jonizacji)" :
-                          use_lte ? "model LTE, T = $(Int(T)) K" :
+                frac = cache[].spec.fractions
+                saha_txt = frac === nothing ? "" :
+                    ", Saha: lg n_e = $(round(ne_exp; digits = 1)), udziały " *
+                    join(["$(ROMAN[z]) $(fmt_pct(frac[z]))" for z in eachindex(frac) if frac[z] >= 0.0005], ", ")
+                src_txt = isempty(lines.I) ? "brak linii (dla wybranych stopni jonizacji nie ma danych)" :
+                          use_lte ? "model LTE, T = $(Int(T)) K$saha_txt" :
                           (source == "lte" ? "NIST (brak Aki dla tego pierwiastka, LTE niedostępny)" : "NIST")
                 info[] = "Linie widoczne: $(length(idx)) z $(length(cl.λ)) (całe widmo)   ·   " *
                          "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))   ·   " *
@@ -331,10 +352,31 @@ function build_app()
             return nothing
         end
 
+        # Zlewanie przerysowań: gdy trwa rysowanie, kolejne zmiany (np. przeciąganie suwaka T, który wysyła
+        # zdarzenie przy każdym kroku) tylko oznaczają stan jako "brudny"; po zakończeniu rysujemy jeszcze raz,
+        # już dla ostatniego stanu. Dzięki temu nie powstaje kolejka przerysowań, którą trzeba by opróżniać.
+        busy  = Threads.Atomic{Bool}(false)
+        dirty = Threads.Atomic{Bool}(false)
+        function request_redraw!()
+            dirty[] = true
+            Threads.atomic_cas!(busy, false, true) == false || return nothing   # ktoś już rysuje
+            try
+                while dirty[]
+                    dirty[] = false
+                    redraw!()
+                end
+            finally
+                busy[] = false
+            end
+            dirty[] && request_redraw!()        # zmiana, która wpadła tuż przed zwolnieniem blokady
+            return nothing
+        end
+
         # ---------------- reakcje ----------------
         onany(elem_dd.value, med_dd.value, xs_dd.value, scale_dd.value, src_dd.value, ref_dd.value,
-              ion1_cb.value, ion2_cb.value, bw_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
-            redraw!()
+              ion1_cb.value, ion2_cb.value, ion3_cb.value, ion4_cb.value, ion5_cb.value,
+              saha_cb.value, ne_sl.value, bw_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
+            request_redraw!()
         end
 
         # powiększanie/pomniejszanie (factor) i przesuwanie (shift, ułamek nowej szerokości okna);
@@ -349,7 +391,7 @@ function build_app()
             w  = (b0 - a0) * factor
             a  = (a0 + b0) / 2 - w / 2 + shift * w
             view_x[] = clamp_view(ti(a), ti(a + w), logm)
-            redraw!()
+            request_redraw!()
         end
         on(b_zin.value) do _
             move_view!(0.5, 0.0)
@@ -375,14 +417,17 @@ function build_app()
                 Bonito.DOM.p("Odtworzenie programu Spektruś 1.0 (Mikołaj Pytel, 2002) w Julii. " *
                              "Pokazuje widma emisyjne pierwiastków 1–99 w UV, świetle widzialnym i podczerwieni."),
                 Bonito.DOM.p("Dane linii spektralnych: ", Bonito.DOM.b("NIST Atomic Spectra Database"),
-                             " (jony I–II, 100–2500 nm). Prosimy cytować: A. Kramida, Yu. Ralchenko, J. Reader " *
+                             " (stopnie jonizacji I–V, 100–2500 nm). Prosimy cytować: A. Kramida, Yu. Ralchenko, J. Reader " *
                              "i NIST ASD Team, NIST Atomic Spectra Database, ",
                              Bonito.DOM.a("https://physics.nist.gov/asd"; href = "https://physics.nist.gov/asd",
                                           target = "_blank", style = "color:#8cf;"), "."),
-                Bonito.DOM.p("Natężenia: model LTE, emisja optycznie cienka, I ∝ g_k·A_ki·ν·exp(−E_k/kT) " *
-                             "(temperatura z suwaka T). Model nie uwzględnia równowagi jonizacji (Saha), więc " *
-                             "względne jasności linii różnych stopni jonizacji nie mają sensu fizycznego; " *
-                             "w obrębie jednego stopnia są porównywalne."),
+                Bonito.DOM.p("Natężenia: model LTE, emisja optycznie cienka, I ∝ (N_z/N)·g_k·A_ki·ν·exp(−E_k/kT)/U_z(T) " *
+                             "(temperatura z suwaka T). Udziały stopni jonizacji N_z/N wynikają z równowagi Saha dla " *
+                             "gęstości elektronowej n_e (suwak lg n_e); uwzględniono stopnie I–V. Funkcje podziału U_z liczone " *
+                             "są z poziomów występujących w pobranych liniach, więc to przybliżenie (dla złożonych atomów " *
+                             "może zaniżać U). Energie jonizacji: tabela z pakietu mendeleev (zgodna z NIST ASD w sprawdzonych " *
+                             "przypadkach). Po wyłączeniu opcji Saha jasności linii różnych stopni jonizacji nie są " *
+                             "porównywalne, a w obrębie jednego stopnia są."),
                 Bonito.DOM.p("Obsługa: kółko myszy = zoom, przeciągnięcie lewym = zaznaczenie obszaru, " *
                              "prawym = przesuwanie; przyciski ◀ ▶ ＋ － działają bez myszy.");
                 style = "max-width:760px;margin:8px 0;padding:10px 14px;background:#222228;" *
@@ -392,7 +437,7 @@ function build_app()
         for (b, (_, (lo, hi))) in zip(btns, RANGES)
             on(b.value) do _
                 view_x[] = (lo, hi)
-                redraw!()
+                request_redraw!()
             end
         end
 
@@ -415,7 +460,7 @@ function build_app()
         end
 
         # podpowiedź po najechaniu na linię
-        on(events(fig).mouseposition) do _
+        function hover_handler(_)
             s = shown[]
             s === nothing && return
             if !(Makie.is_mouseinside(ax.scene) || Makie.is_mouseinside(ax_strip.scene))
@@ -445,6 +490,13 @@ function build_app()
             else
                 set_hover!("Najedź kursorem na linię.")
                 set_summary!("", "")
+            end
+        end
+        on(events(fig).mouseposition) do ev
+            try
+                hover_handler(ev)
+            catch e
+                @warn "Błąd w podpowiedzi (hover)" exception = (e, catch_backtrace())
             end
         end
 
@@ -508,13 +560,15 @@ function build_app()
             row(Bonito.DOM.span("Rysuj linie:"),
                 lab("niezjonizowane (I)", ion1_cb),
                 lab("zjonizowane (II)", ion2_cb),
-                Bonito.DOM.span("☐ podwójnie, potrójnie, poczwórnie zjonizowane (III–V; wymagają pobrania danych z NIST)";
-                                style = "opacity:0.4;"),
+                lab("podwójnie (III)", ion3_cb),
+                lab("potrójnie (IV)", ion4_cb),
+                lab("poczwórnie (V)", ion5_cb),
                 lab("czarno-białe", bw_cb),
                 about_btn),
             Bonito.DOM.div(about_panel),
             row(lab("Źródło natężeń:", src_dd),
                 lab("T [K]:", T_sl, val(T_sl.value)),
+                lab("Saha, lg n_e [cm⁻³]:", saha_cb, ne_sl, val(ne_sl.value)),
                 lab("Skala natężeń:", scale_dd),
                 lab("Odniesienie:", ref_dd),
                 lab("Próg [dekady]:", thr_sl, val(thr_sl.value)),
