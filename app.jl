@@ -154,7 +154,62 @@ function build_app()
             return nothing
         end
 
+        # Kreski tworzymy raz i potem tylko podmieniamy dane (tworzenie i usuwanie wykresów w WGLMakie
+        # jest drogie). Liczba wierzchołków to stała pojemność `cap`; nadmiar to przezroczyste odcinki
+        # zerowej długości w x = 1 nm (dodatnie, więc bezpieczne w skali log). Dzięki temu tablice punktów
+        # i kolorów mają zawsze tę samą długość. Wykresy budujemy od nowa tylko przy zmianie skali osi X
+        # albo gdy zabraknie pojemności.
+        segs  = Ref{Any}(nothing)
+        PAD   = Point2f(1, 0)
+        BLANK = RGBAf(0, 0, 0, 0)
+
+        # nakładka pokazująca zaznaczany obszar (przeciąganie lewym przyciskiem); x w nm,
+        # wartości początkowe dodatnie, żeby nie psuły skali log
+        sel       = Observable((1.0, 1.0))
+        sel_vis   = Observable(false)
+        sel_main  = lift(sel) do r
+            Rect2f(Point2f(min(r[1], r[2]), 0), Vec2f(abs(r[2] - r[1]), 1.05))
+        end
+        sel_strip = lift(sel) do r
+            Rect2f(Point2f(min(r[1], r[2]), 0), Vec2f(abs(r[2] - r[1]), 1))
+        end
+
+        function drop_segments!()
+            empty!(ax)
+            empty!(ax_strip)
+            segs[] = nothing
+            return nothing
+        end
+
+        function make_segments!(cap)
+            pts1 = Observable(fill(PAD, 2 * cap));  col1 = Observable(fill(BLANK, 2 * cap))
+            pts2 = Observable(fill(PAD, 2 * cap));  col2 = Observable(fill(BLANK, 2 * cap))
+            linesegments!(ax_strip, pts1; color = col1, linewidth = 1.5)
+            linesegments!(ax, pts2; color = col2, linewidth = 1.5)
+            for (axis, rect) in ((ax_strip, sel_strip), (ax, sel_main))
+                poly!(axis, rect; color = RGBAf(1, 1, 1, 0.15), strokecolor = RGBAf(1, 1, 1, 0.9),
+                      strokewidth = 1.5, visible = sel_vis, inspectable = false)
+            end
+            segs[] = (; pts1, col1, pts2, col2, cap)
+            return nothing
+        end
+
+        # pomiar czasu etapów redraw! (wypisywany w konsoli; ustaw TIMING = false, żeby wyłączyć)
+        TIMING = true
+        tmark = Ref(time())
+        function lap(label)
+            TIMING || return nothing
+            t = time()
+            println("  [redraw] ", rpad(label, 34), lpad(round(Int, 1000 * (t - tmark[])), 6), " ms")
+            tmark[] = t
+            return nothing
+        end
+
+        # przypisuj podpowiedź tylko, gdy tekst się zmienił (Observable rozsyła każde przypisanie)
+        set_hover!(txt) = (hover[] == txt || (hover[] = txt); nothing)
+
         function redraw!()
+            t_start = time(); tmark[] = t_start
             redrawing[] = true
             try
                 Z      = ELEMENTS.Z[findfirst(==(elem_dd.value[]), OPTS)]
@@ -178,12 +233,11 @@ function build_app()
                 end
                 lines   = cache[].spec.lines
                 use_lte = cache[].spec.use_lte
-
-                empty!(ax)
-                empty!(ax_strip)
+                lap("odczyt ustawień + linie (cache)")
 
                 # skala osi X (przełączana, gdy na osiach nie ma wykresów)
                 if logmode != log_x[]
+                    drop_segments!()    # zmieniamy skalę, gdy na osiach nie ma wykresów
                     if logmode
                         # Makie waliduje obecne limity przy zmianie skali, a (0, 3000) nie nadaje się
                         # do log10, więc przed przełączeniem ustawiamy dodatnie
@@ -208,30 +262,41 @@ function build_app()
                                         px * (x1 - x0) / wpx, 0.01)
                 end
                 cl = cluster_window(lines, -Inf, Inf, res)
+                lap("cluster_window ($(length(lines.I)) linii)")
 
                 Iref = reference_intensity(lines, x0, x1; ref = refmode)
                 idx  = isempty(cl.I) ? Int[] : findall(visible_mask(cl.I, Iref, decades))
 
-                if !isempty(idx)
-                    pts1 = Point2f[]; col1 = RGBAf[]
-                    pts2 = Point2f[]; col2 = RGBAf[]
-                    for k in idx
-                        h = line_height(cl.I[k], Iref, decades; scale = scale)
-                        (cr, cg, cb) = bw ? (1.0, 1.0, 1.0) : wl2rgb(cl.λ[k])
-                        a = 0.15 + 0.85 * h
-                        push!(pts1, Point2f(cl.λ[k], 0), Point2f(cl.λ[k], 1))
-                        push!(col1, RGBAf(cr, cg, cb, a), RGBAf(cr, cg, cb, a))
-                        push!(pts2, Point2f(cl.λ[k], 0), Point2f(cl.λ[k], h))
-                        push!(col2, RGBAf(cr, cg, cb, 1), RGBAf(cr, cg, cb, 1))
-                    end
-                    linesegments!(ax_strip, pts1; color = col1, linewidth = 1.5)
-                    linesegments!(ax, pts2; color = col2, linewidth = 1.5)
+                nseg = length(idx)
+                if segs[] === nothing || nseg > segs[].cap
+                    drop_segments!()
+                    make_segments!(max(2 * nseg, 4096))
+                    lap("nowe wykresy (pojemność $(segs[].cap))")
                 end
-                ax.xlabel = "λ [nm, $(medium == "air" ? "powietrze" : "próżnia")]"
+                sg = segs[]
+                pts1 = fill(PAD, 2 * sg.cap);  col1 = fill(BLANK, 2 * sg.cap)
+                pts2 = fill(PAD, 2 * sg.cap);  col2 = fill(BLANK, 2 * sg.cap)
+                for (j, k) in enumerate(idx)
+                    h = line_height(cl.I[k], Iref, decades; scale = scale)
+                    (cr, cg, cb) = bw ? (1.0, 1.0, 1.0) : wl2rgb(cl.λ[k])
+                    a = 0.15 + 0.85 * h
+                    i2 = 2 * j
+                    pts1[i2 - 1] = Point2f(cl.λ[k], 0);  pts1[i2] = Point2f(cl.λ[k], 1)
+                    col1[i2 - 1] = RGBAf(cr, cg, cb, a);  col1[i2] = RGBAf(cr, cg, cb, a)
+                    pts2[i2 - 1] = Point2f(cl.λ[k], 0);  pts2[i2] = Point2f(cl.λ[k], h)
+                    col2[i2 - 1] = RGBAf(cr, cg, cb, 1);  col2[i2] = RGBAf(cr, cg, cb, 1)
+                end
+                lap("punkty i kolory ($nseg kresek)")
+                sg.pts1[] = pts1;  sg.col1[] = col1
+                sg.pts2[] = pts2;  sg.col2[] = col2
+                lap("aktualizacja danych wykresów")
+                xlabel_txt = "λ [nm, $(medium == "air" ? "powietrze" : "próżnia")]"
+                ax.xlabel[] == xlabel_txt || (ax.xlabel = xlabel_txt)
                 xlims!(ax, x0, x1)
                 ax.xticks = nice_ticks(x0, x1, logmode)
                 ylims!(ax, 0, 1.05)
                 ylims!(ax_strip, 0, 1)
+                lap("limity i ticki")
 
                 shown[] = (λ = cl.λ[idx], rows = cl.rows[idx], n = cl.n[idx], lines = lines)
                 src_txt = isempty(lines.I) ? "brak linii (zaznacz stopień jonizacji)" :
@@ -240,6 +305,9 @@ function build_app()
                 info[] = "Linie widoczne: $(length(idx)) z $(length(cl.λ)) (całe widmo)   ·   " *
                          "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))   ·   " *
                          "rozdzielczość: $(round(res; sigdigits = 2)) nm"
+                lap("info")
+                TIMING && println("  [redraw] ", rpad("RAZEM (strona Julii)", 34),
+                                  lpad(round(Int, 1000 * (time() - t_start)), 6), " ms")
             finally
                 redrawing[] = false
             end
@@ -338,7 +406,7 @@ function build_app()
             end
             λs = s.λ
             if isempty(λs)
-                hover[] = "Brak widocznych linii."
+                set_hover!("Brak widocznych linii.")
                 return
             end
             mraw = mouseposition(ax.scene)[1]
@@ -353,10 +421,51 @@ function build_app()
             cand = [i for i in (k - 1, k) if 1 <= i <= length(λs)]
             i = cand[argmin([abs(t(λs[j]) - t(mx)) for j in cand])]
             if abs(t(λs[i]) - t(mx)) <= tol
-                hover[] = describe_line(s.lines, s.rows[i]; n = s.n[i])
+                set_hover!(describe_line(s.lines, s.rows[i]; n = s.n[i]))
             else
-                hover[] = "Najedź kursorem na linię."
+                set_hover!("Najedź kursorem na linię.")
             end
+        end
+
+        # podgląd zaznaczenia: rysujemy prostokąt od miejsca naciśnięcia lewego przycisku do kursora
+        # (samo powiększenie po puszczeniu przycisku robi Makie)
+        dragging = Ref(false)
+        drag_x0  = Ref(1.0)
+        function mouse_nm()
+            mraw = mouseposition(ax.scene)[1]
+            return (log_x[] && mraw < 4.0) ? 10.0^mraw : mraw      # j.w.: log10 -> nm
+        end
+        in_axes() = Makie.is_mouseinside(ax.scene) || Makie.is_mouseinside(ax_strip.scene)
+        # wysoki priorytet: Makie przechwytuje zdarzenia myszy w trakcie przeciągania (własny zoom),
+        # więc listenery o priorytecie 0 nie dostawałyby ruchów ani puszczenia przycisku
+        on(events(fig).mousebutton; priority = 10_000) do ev
+            ev.button == Makie.Mouse.left || return
+            if ev.action == Makie.Mouse.press
+                if in_axes()
+                    x = mouse_nm()
+                    if x > 0
+                        dragging[] = true
+                        drag_x0[] = x
+                        sel[] = (x, x)
+                    end
+                end
+            elseif ev.action == Makie.Mouse.release
+                dragging[] = false
+                sel_vis[] && (sel_vis[] = false)
+            end
+        end
+        on(events(fig).mouseposition; priority = 10_000) do _
+            dragging[] || return
+            if !(Makie.Mouse.left in events(fig).mousebuttonstate)    # puszczenie przegapione
+                dragging[] = false
+                sel_vis[] && (sel_vis[] = false)
+                return
+            end
+            x = mouse_nm()
+            x > 0 || return
+            lo, hi = view_x[]
+            sel[] = (drag_x0[], clamp(x, lo, hi))
+            sel_vis[] || (sel_vis[] = true)
         end
 
         redraw!()    # pierwsze rysowanie

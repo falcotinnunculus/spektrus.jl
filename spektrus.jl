@@ -26,7 +26,7 @@ function wl2rgb(λ)
     if λ < 380
         return (0.62, 0.45, 0.95)
     elseif λ > 780
-        return (0.80, 0.25, 0.20)
+        return (1.00, 0.50, 0.45)
     end
     r, g, b = if λ < 440
         (-(λ - 440) / 60, 0.0, 1.0)
