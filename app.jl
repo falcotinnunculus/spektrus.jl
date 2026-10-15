@@ -54,6 +54,31 @@ function clamp_view(lo, hi, logmode)
     return (ti(a), ti(a + w))
 end
 
+# etykiety osi λ jako zwykłe liczby (100 zamiast 10², 1000 zamiast 10³)
+fmt_nm(vals) = [let r = round(v; sigdigits = 6)
+                    isinteger(r) ? string(Int(r)) : string(r)
+                end for v in vals]
+
+# "ładne" ticki osi λ dla okna [lo, hi] nm: 400, 500, 600... (liniowo lub 1-2-5 w skali log).
+# Zwraca samą listę wartości (etykiety robi xtickformat = fmt_nm).
+function nice_ticks(lo, hi, logmode)
+    vals = Float64[]
+    if logmode && hi / lo > 3
+        mants = hi / lo > 10 ? (1, 2, 5) : (1, 2, 3, 5)
+        for k in floor(Int, log10(lo)):ceil(Int, log10(hi)), m in mants
+            v = m * 10.0^k
+            lo <= v <= hi && push!(vals, v)
+        end
+    else
+        raw  = (hi - lo) / 6
+        mag  = 10.0^floor(log10(raw))
+        step = mag * first(m for m in (1, 2, 5, 10) if m * mag >= raw)
+        vals = collect(ceil(lo / step) * step : step : hi)
+    end
+    length(vals) < 2 && return Makie.automatic
+    return vals
+end
+
 function build_app()
     return Bonito.App() do session
         # ---------------- kontrolki ----------------
@@ -67,6 +92,8 @@ function build_app()
         T_sl     = Bonito.Slider(1000:100:10000; value = 6000)
         res_sl   = Bonito.Slider(0.0:0.1:5.0; value = 0.0)
         thr_sl   = Bonito.Slider(0.5:0.1:6.0; value = 4.0)
+        rescb    = Bonito.Checkbox(false)                    # rozdzielczość zależna od zoomu
+        px_sl    = Bonito.Slider(1:10; value = 2)            # ... w pikselach ekranu
         btns     = [Bonito.Button(name) for (name, _) in RANGES]
 
         info  = Observable("")
@@ -85,7 +112,8 @@ function build_app()
         ax_strip = Axis(fig[1, 1]; height = 90,
                         yticksvisible = false, yticklabelsvisible = false,
                         xticksvisible = false, xticklabelsvisible = false, axstyle...)
-        ax = Axis(fig[2, 1]; xlabel = "λ [nm]", ylabel = "natężenie względne", axstyle...)
+        ax = Axis(fig[2, 1]; xlabel = "λ [nm]", ylabel = "natężenie względne",
+                  xtickformat = fmt_nm, axstyle...)
         linkxaxes!(ax_strip, ax)
         xlims!(ax, 380, 780)
 
@@ -106,6 +134,18 @@ function build_app()
             return (lo, hi)
         end
 
+        # przerysowanie po zakończeniu zoomu/przesuwania (czekamy 0,2 s na brak kolejnych zmian)
+        last_change = Ref(0.0)
+        function schedule_redraw!()
+            stamp = time()
+            last_change[] = stamp
+            @async begin
+                sleep(0.2)
+                last_change[] == stamp && redraw!()
+            end
+            return nothing
+        end
+
         function redraw!()
             redrawing[] = true
             try
@@ -116,7 +156,6 @@ function build_app()
                 refmode = ref_dd.value[] == "linia w oknie" ? "window" :
                           ref_dd.value[] == "linia pierwiastka" ? "all" : "visible"
                 T       = Float64(T_sl.value[])
-                res     = max(Float64(res_sl.value[]), 0.01)
                 decades = Float64(thr_sl.value[])
                 ion2    = ion_cb.value[]
                 logmode = xs_dd.value[] == "logarytmiczna"
@@ -128,19 +167,36 @@ function build_app()
                 end
                 lines   = cache[].spec.lines
                 use_lte = cache[].spec.use_lte
-                cl      = cluster_window(lines, -Inf, Inf, res)
 
                 empty!(ax)
                 empty!(ax_strip)
 
                 # skala osi X (przełączana, gdy na osiach nie ma wykresów)
                 if logmode != log_x[]
-                    log_x[] = logmode
+                    if logmode
+                        # Makie waliduje obecne limity przy zmianie skali, a (0, 3000) nie nadaje się
+                        # do log10, więc przed przełączeniem ustawiamy dodatnie
+                        lo_s = max(view_x[][1], X_MIN_LOG)
+                        hi_s = max(view_x[][2], lo_s * 1.001)
+                        xlims!(ax, lo_s, hi_s)
+                        xlims!(ax_strip, lo_s, hi_s)
+                    end
                     ax.xscale = logmode ? log10 : identity
                     ax_strip.xscale = logmode ? log10 : identity
+                    log_x[] = logmode      # dopiero po udanej zmianie
                 end
                 x0, x1 = clamp_view(view_x[]..., logmode)
                 view_x[] = (x0, x1)
+
+                res = max(Float64(res_sl.value[]), 0.01)
+                if rescb.value[]
+                    # rozdzielczość = px_sl pikseli ekranu przy bieżącym powiększeniu
+                    wpx = max(Float64(ax.scene.viewport[].widths[1]), 200.0)
+                    px  = Float64(px_sl.value[])
+                    res = max(logmode ? px * log(x1 / x0) / wpx * sqrt(x0 * x1) :
+                                        px * (x1 - x0) / wpx, 0.01)
+                end
+                cl = cluster_window(lines, -Inf, Inf, res)
 
                 Iref = reference_intensity(lines, x0, x1; ref = refmode)
                 idx  = isempty(cl.I) ? Int[] : findall(visible_mask(cl.I, Iref, decades))
@@ -162,6 +218,7 @@ function build_app()
                 end
                 ax.xlabel = "λ [nm, $(medium == "air" ? "powietrze" : "próżnia")]"
                 xlims!(ax, x0, x1)
+                ax.xticks = nice_ticks(x0, x1, logmode)
                 ylims!(ax, 0, 1.05)
                 ylims!(ax_strip, 0, 1)
 
@@ -169,7 +226,8 @@ function build_app()
                 src_txt = use_lte ? "model LTE, T = $(Int(T)) K" :
                           (source == "lte" ? "NIST (brak Aki dla tego pierwiastka, LTE niedostępny)" : "NIST")
                 info[] = "Linie widoczne: $(length(idx)) z $(length(cl.λ)) (całe widmo)   ·   " *
-                         "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))"
+                         "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))   ·   " *
+                         "rozdzielczość: $(round(res; sigdigits = 2)) nm"
             finally
                 redrawing[] = false
             end
@@ -178,7 +236,7 @@ function build_app()
 
         # ---------------- reakcje ----------------
         onany(elem_dd.value, med_dd.value, xs_dd.value, scale_dd.value, src_dd.value, ref_dd.value,
-              ion_cb.value, T_sl.value, res_sl.value, thr_sl.value) do args...
+              ion_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
             redraw!()
         end
 
@@ -203,7 +261,8 @@ function build_app()
                 end
             end
             view_x[] = (clo, chi)
-            ref_dd.value[] == "linia w oknie" && redraw!()
+            ax.xticks = nice_ticks(clo, chi, log_x[])
+            (ref_dd.value[] == "linia w oknie" || rescb.value[]) && schedule_redraw!()
         end
 
         # podpowiedź po najechaniu na linię
@@ -246,7 +305,7 @@ function build_app()
         val(obs) = Bonito.DOM.span(map(string, obs); style = "min-width:3em;")
 
         return Bonito.DOM.div(
-            Bonito.DOM.h2("Spektruś.jl BETA"; style = "margin:0 0 10px 0;"),
+            Bonito.DOM.h2("Spektruś.jl"; style = "margin:0 0 10px 0;"),
             row(lab("Pierwiastek:", elem_dd),
                 lab("Zakres:", btns...),
                 lab("Długość fali:", med_dd),
@@ -257,7 +316,8 @@ function build_app()
                 lab("Skala natężeń:", scale_dd),
                 lab("Odniesienie:", ref_dd),
                 lab("Próg [dekady]:", thr_sl, val(thr_sl.value)),
-                lab("Rozdzielczość [nm]:", res_sl, val(res_sl.value))),
+                lab("Rozdzielczość [nm]:", res_sl, val(res_sl.value)),
+                lab("lub zależna od zoomu [px]:", rescb, px_sl, val(px_sl.value))),
             Bonito.DOM.div(fig),
             Bonito.DOM.div(info; style = "margin-top:6px;color:#9aa;"),
             Bonito.DOM.div(hover; style = "margin-top:4px;font-family:monospace;min-height:1.5em;");
@@ -266,8 +326,6 @@ function build_app()
 end
 
 app = build_app()
-
-Bonito.js"""document.title = "spektrus.jl BETA";"""
 
 if abspath(PROGRAM_FILE) == @__FILE__
     server = Bonito.Server(app, "127.0.0.1", 8080)

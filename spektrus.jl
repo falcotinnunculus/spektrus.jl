@@ -79,9 +79,13 @@ Linie jednego pierwiastka z natężeniami `I`, posortowane po długości fali `�
 source = "lte"  : I = g_k·A_ki·ν·exp(−E_k/kT) (emisja optycznie cienka w LTE);
                  gdy pierwiastek nie ma danych do modelu, wraca do natężeń NIST (use_lte = false)
 source = "nist" : natężenia NIST (jednostki umowne), tylko linie, które je mają
+
+Stopnie jonizacji: `ions` (np. [1], [2], [1, 2]) wybiera dokładnie te stopnie; bez `ions`
+działa dawne `ion2` (false: tylko I, true: I i II). Pusty wybór daje pusty wynik.
 """
-function prepare_lines(df, Z; ion2 = false, medium = "air", source = "lte", T = 6000.0)
-    sub = df[(df.Z .== Z) .& (df.ion .<= (ion2 ? 2 : 1)), :]
+function prepare_lines(df, Z; ion2 = false, ions = nothing, medium = "air", source = "lte", T = 6000.0)
+    stages = ions === nothing ? (ion2 ? (1, 2) : (1,)) : ions
+    sub = df[(df.Z .== Z) .& in.(df.ion, Ref(stages)), :]
     sub.λ = medium == "air" ? vac2air.(sub.wl_vac_nm) : copy(sub.wl_vac_nm)
     use_lte = false
     if source == "lte" && :Aki_s in propertynames(sub)
