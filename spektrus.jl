@@ -10,12 +10,34 @@ using CSV, DataFrames
 export load_data, element_list, vac2air, wl2rgb, cluster_ids, prepare_lines,
        cluster_window, reference_intensity, visible_mask, line_height, describe_line,
        load_ionization, ionization_table, level_table, partition_function,
-       saha_fractions, ionization_balance
+       saha_fractions, ionization_balance, describe_members,
+       unit_value, unit_to_nm, unit_text, unit_is_energy, element_name
 
 const C2  = 1.438777            # hc/k [cm·K]
 const VIS = (380.0, 780.0)      # zakres widzialny [nm]
 const SAHA_C    = 4.8294e15     # 2 (2π m_e k / h²)^{3/2} [cm⁻³ K^{-3/2}] (CODATA)
 const MAX_STAGE = 5             # najwyższy rozważany stopień jonizacji (V)
+
+# ---------------- jednostki osi X ----------------
+const HC_EV_NM = 1239.841984    # h·c [eV·nm]
+
+# Wartość osi X dla długości fali λ [nm] w jednostce u: "nm", "Å", "µm", "cm⁻¹" (liczba falowa) albo "eV" (energia fotonu).
+unit_value(λ, u) = u == "nm" ? λ : u == "Å" ? 10λ : u == "µm" ? λ / 1000 :
+                   u == "cm⁻¹" ? 1e7 / λ : HC_EV_NM / λ
+
+# Odwrotność unit_value: długość fali [nm] z wartości x w jednostce u.
+unit_to_nm(x, u) = u == "nm" ? x : u == "Å" ? x / 10 : u == "µm" ? 1000x :
+                   u == "cm⁻¹" ? 1e7 / x : HC_EV_NM / x
+
+# cm⁻¹ i eV rosną z energią (a nie z długością fali) i odnoszą się do długości fal w próżni.
+unit_is_energy(u) = u == "cm⁻¹" || u == "eV"
+
+# Tekst "wartość jednostka" dla długości fali λ [nm].
+unit_text(λ, u) = u == "nm" ? "$(round(λ; digits = 3)) nm" : "$(round(unit_value(λ, u); sigdigits = 7)) $u"
+
+# ---------------- polskie nazwy pierwiastków (indeks = liczba atomowa) ----------------
+const NAMES_PL = ["Wodór", "Hel", "Lit", "Beryl", "Bor", "Węgiel", "Azot", "Tlen", "Fluor", "Neon", "Sód", "Magnez", "Glin", "Krzem", "Fosfor", "Siarka", "Chlor", "Argon", "Potas", "Wapń", "Skand", "Tytan", "Wanad", "Chrom", "Mangan", "Żelazo", "Kobalt", "Nikiel", "Miedź", "Cynk", "Gal", "German", "Arsen", "Selen", "Brom", "Krypton", "Rubid", "Stront", "Itr", "Cyrkon", "Niob", "Molibden", "Technet", "Ruten", "Rod", "Pallad", "Srebro", "Kadm", "Ind", "Cyna", "Antymon", "Tellur", "Jod", "Ksenon", "Cez", "Bar", "Lantan", "Cer", "Prazeodym", "Neodym", "Promet", "Samar", "Europ", "Gadolin", "Terb", "Dysproz", "Holm", "Erb", "Tul", "Iterb", "Lutet", "Hafn", "Tantal", "Wolfram", "Ren", "Osm", "Iryd", "Platyna", "Złoto", "Rtęć", "Tal", "Ołów", "Bizmut", "Polon", "Astat", "Radon", "Frans", "Rad", "Aktyn", "Tor", "Protaktyn", "Uran", "Neptun", "Pluton", "Ameryk", "Kiur", "Berkel", "Kaliforn", "Einstein"]
+element_name(Z) = 1 <= Z <= length(NAMES_PL) ? NAMES_PL[Z] : string(Z)
 
 "Długość fali z próżni na powietrze (wzór Edlena/Mortona), tylko dla 200–2000 nm."
 function vac2air(λ)
@@ -239,8 +261,9 @@ end
 """
 Zlewa linie z okna [λlo, λhi] leżące bliżej niż `res` [nm] (jak pryzmat lub piksel).
 Natężenia są sumowane, położenie to średnia ważona natężeniem.
-Zwraca (λ, I, n, rows, spread): `rows` to indeksy najsilniejszej linii każdego klastra w `lines`,
-`spread` to rozrzut długości fal linii w klastrze [nm].
+Zwraca (λ, I, n, rows, spread, first, last): `rows` to indeksy najsilniejszej linii każdego klastra w `lines`,
+`spread` to rozrzut długości fal linii w klastrze [nm], a `first`/`last` to zakres wierszy `lines` należących do klastra
+(linie są posortowane po λ, więc klaster to ciągły zakres).
 """
 function cluster_window(lines, λlo, λhi, res)
     idx = findall(x -> λlo <= x <= λhi, lines.λ)
@@ -250,18 +273,22 @@ function cluster_window(lines, λlo, λhi, res)
     nc = isempty(ids) ? 0 : maximum(ids)
     Ic = zeros(nc); λw = zeros(nc); n = zeros(Int, nc); best = zeros(Int, nc)
     lmin = fill(Inf, nc); lmax = fill(-Inf, nc)
+    jfirst = zeros(Int, nc); jlast = zeros(Int, nc)
     for j in eachindex(ids)
         c = ids[j]
         Ic[c] += I[j]
         λw[c] += λ[j] * I[j]
         n[c] += 1
         lmin[c] = min(lmin[c], λ[j]); lmax[c] = max(lmax[c], λ[j])
+        jfirst[c] == 0 && (jfirst[c] = j)
+        jlast[c] = j
         if best[c] == 0 || I[j] > I[best[c]]
             best[c] = j
         end
     end
     λw ./= Ic
-    return (; λ = λw, I = Ic, n = n, rows = idx[best], spread = lmax .- lmin)
+    return (; λ = λw, I = Ic, n = n, rows = idx[best], spread = lmax .- lmin,
+              first = idx[jfirst], last = idx[jlast])
 end
 
 """
@@ -294,14 +321,40 @@ end
 fmt(x) = ismissing(x) ? "?" : string(x)
 
 "Opis linii do podpowiedzi: pierwiastek, λ, przejście, Aki. `n` > 1 oznacza zlane linie."
-function describe_line(lines, row; n = 1, spread = 0.0)
+function describe_line(lines, row; n = 1, spread = 0.0, unit = "nm")
     r = lines[row, :]
     ion = ("I", "II", "III", "IV", "V")[clamp(r.ion, 1, 5)]
     lower = join(fmt.([r.conf_i, r.term_i, r.J_i]), " ")
     upper = join(fmt.([r.conf_k, r.term_k, r.J_k]), " ")
     spr = spread == 0 ? "0" : string(round(spread; sigdigits = 2))
     extra = n > 1 ? "  (zlane linie: $n, rozrzut λ: $spr nm)" : ""
-    return "$(r.symbol) $ion  $(round(r.λ; digits = 3)) nm   $lower → $upper   Aki = $(fmt(r.Aki)) s⁻¹$extra"
+    wl = unit == "nm" ? unit_text(r.λ, "nm") :
+         unit_is_energy(unit) ? "$(round(r.λ; digits = 3)) nm (próżnia) = $(unit_text(r.λ, unit))" :
+         "$(round(r.λ; digits = 3)) nm = $(unit_text(r.λ, unit))"
+    return "$(r.symbol) $ion  $wl   $lower → $upper   Aki = $(fmt(r.Aki)) s⁻¹$extra"
+end
+
+"""
+Składowe zlanego klastra (wiersze `first:last` w `lines`), od najsilniejszej, po jednej w wierszu:
+poziomy, Aki i udział w natężeniu klastra (długość fali tylko wtedy, gdy składowe się różnią).
+Pokazuje najwyżej `max` pozycji.
+"""
+function describe_members(lines, first, last; max = 6)
+    rows = first:last
+    total = sum(lines.I[rows])
+    order = sortperm(lines.I[rows]; rev = true)
+    λs = lines.λ[rows]
+    differ = maximum(λs) > minimum(λs)
+    out = String[]
+    for k in order[1:min(max, length(order))]
+        r = lines[rows[k], :]
+        lower = join(fmt.([r.conf_i, r.term_i, r.J_i]), " ")
+        upper = join(fmt.([r.conf_k, r.term_k, r.J_k]), " ")
+        wl = differ ? "$(round(r.λ; digits = 4)) nm  " : ""
+        push!(out, "  $(wl)$lower → $upper   Aki = $(fmt(r.Aki)) s⁻¹   udział $(round(Int, 100 * r.I / total))%")
+    end
+    length(order) > max && push!(out, "  … i $(length(order) - max) kolejnych")
+    return join(out, "\n")
 end
 
 end # module
