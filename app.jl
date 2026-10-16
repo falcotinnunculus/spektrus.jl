@@ -594,14 +594,17 @@ end
 
 app = build_app()
 
-if abspath(PROGRAM_FILE) == @__FILE__
-    server = Bonito.Server(app, "127.0.0.1", 8080)
-    println("Spektruś działa: http://127.0.0.1:8080   (Ctrl+C kończy)")
-    try
-        while true
-            sleep(1)
-        end
-    catch e
-        e isa InterruptException || rethrow()
+# get_server() sam wykrywa port (ENV["PORT"] lub 8080), binduje na 0.0.0.0
+# i konfiguruje proxy_url, gdy działa za reverse proxy (JuliaHub, Heroku itp.).
+server = Bonito.get_server()
+route!(server, "/" => app)
+println("Spektruś działa: ", Bonito.online_url(server, "/"))
+
+# Proces trzymamy przy życiu – serwer HTTP działa w tle.
+try
+    while true
+        sleep(1)
     end
+catch e
+    e isa InterruptException || rethrow()
 end
