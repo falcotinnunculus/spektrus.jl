@@ -138,6 +138,13 @@ fmt_rel(v) = !isfinite(v) ? "∞" : v >= 1e6 ? string(round(v; sigdigits = 3)) :
 
 const ROMAN = ("I", "II", "III", "IV", "V")
 
+# kolor kreski widoczny na jasnym tle: jasne barwy (żółty, cyjan) przyciemniamy do umiarkowanej jasności
+function darken_for_light(c)
+    lum = 0.299 * c[1] + 0.587 * c[2] + 0.114 * c[3]
+    f = lum > 0.35 ? 0.35 / lum : 1.0           # próg dobrany tak, by kontrast na bieli wszędzie wynosił co najmniej ok. 3,8:1
+    return (c[1] * f, c[2] * f, c[3] * f)
+end
+
 # udział procentowy: pełne procenty od 10% wzwyż, poniżej 2 cyfry znaczące
 fmt_pct(f) = f >= 0.1 ? "$(round(Int, 100f))%" : "$(round(100f; sigdigits = 2))%"
 
@@ -162,7 +169,11 @@ const TR = Dict(
     "source"    => ("Źródło:", "Source:"),
     "scale"     => ("Skala:", "Scale:"),
     "reference" => ("Odniesienie:", "Reference:"),
-    "threshold" => ("Próg [dekady]:", "Threshold [decades]:"),
+    "threshold" => ("Zakres jasności [dekady]:", "Brightness range [decades]:"),
+    "thresholdtip" => ("Pokazuje linie słabsze od linii odniesienia co najwyżej o tyle rzędów wielkości (dekad); np. 4 = do 10 000 razy słabsze. " *
+                       "W skali logarytmicznej ustala też skalę wysokości kresek.",
+                       "Shows lines weaker than the reference line by at most this many orders of magnitude (decades); e.g. 4 = up to 10,000 times weaker. " *
+                       "On the logarithmic scale it also sets the scale of the line heights."),
     "resol"     => ("Rozdzielczość [nm]:", "Resolution [nm]:"),
     "resolpx"   => ("lub zależna od zoomu [px]:", "or zoom-dependent [px]:"),
     "bw"        => ("czarno-białe", "black and white"),
@@ -174,11 +185,13 @@ const TR = Dict(
     "tip5"      => ("czterokrotnie zjonizowane (X⁴⁺)", "quadruply ionized (X⁴⁺)"),
     "langtip"   => ("Język interfejsu: PL / EN", "Interface language: PL / EN"),
     "pngtip"    => ("Zapisz wykres jako obraz PNG", "Save the plot as a PNG image"),
+    "pnglight"  => ("Zapisz PNG na jasnym tle (do druku): białe tło, czarne osie, ciemniejsze kreski",
+                    "Save a PNG on a light background (for printing): white background, black axes, darker lines"),
     "warming"   => ("⏳ Rozgrzewanie…", "⏳ Warming up…"),
     "warmtip"   => ("Pierwsze użycie każdej funkcji kompiluje kod, co powoduje chwilowe lagi. Przycisk wykonuje przykładowe operacje " *
-                    "(przesunięcia, powiększenia, skala, jednostki, inny pierwiastek), potem przywraca ustawienia i znika.",
+                    "(przesunięcia, powiększenia, skala, jednostki, suwaki temperatury i zakresu jasności, inny pierwiastek), potem przywraca ustawienia i znika.",
                     "The first use of each function compiles code, which causes brief lags. The button runs sample operations " *
-                    "(panning, zooming, scale, units, another element), then restores your settings and disappears."),
+                    "(panning, zooming, scale, units, the temperature and brightness range sliders, another element), then restores your settings and disappears."),
 )
 
 # Para list rozwijanych PL/EN o wspólnym indeksie (źródłem prawdy jest `idx`). Zmiana napisów na liście w
@@ -256,6 +269,8 @@ function build_app()
         about_b  = Bonito.Button("ⓘ About")
         lang_btn = Bonito.Button("PL | EN")
         png_btn  = Bonito.Button("💾 PNG")
+        pngl_a   = Bonito.Button("💾 PNG jasny")
+        pngl_b   = Bonito.Button("💾 PNG light")
         warm_a   = Bonito.Button("🔥 Rozgrzej")
         warm_b   = Bonito.Button("🔥 Warm up")
         warm_state = Observable(WARMED[] ? "done" : "idle")        # "idle" -> "running" -> "done"
@@ -294,6 +309,7 @@ function build_app()
         # ---------------- stan ----------------
         view_x    = Ref((380.0, 780.0))   # bieżący zakres osi X [nm] (w nm, nie w log10)
         redrawing = Ref(false)            # ignorujemy zmiany limitów wywołane przez nasz kod
+        print_mode = Ref(false)           # tryb zapisu na jasnym tle: tylko na czas zrzutu PNG
         cache     = Ref{Any}(nothing)     # ostatnio policzone linie (element, T, ośrodek, źródło)
         shown     = Ref{Any}(nothing)     # to, co widać na wykresie (dla podpowiedzi)
         cur_res   = Ref(RES_FLOOR)        # rozdzielczość zlewania użyta przy ostatnim rysowaniu [nm]
@@ -481,12 +497,14 @@ function build_app()
                     h = line_height(cl.I[k], Iref, decades; scale = scale)
                     X = to_X(cl.λ[k])
                     (cr, cg, cb) = bw ? (1.0, 1.0, 1.0) : wl2rgb(cl.λ[k])
+                    # główny wykres na jasnym tle (zapis do druku): czarne albo przyciemnione kreski; pasek tęczy zostaje czarny
+                    (mr, mg, mb) = !print_mode[] ? (cr, cg, cb) : bw ? (0.0, 0.0, 0.0) : darken_for_light((cr, cg, cb))
                     a = 0.15 + 0.85 * h
                     i2 = 2 * j
                     pts1[i2 - 1] = Point2d(X, 0.0);  pts1[i2] = Point2d(X, 1.0)
                     col1[i2 - 1] = RGBAf(cr, cg, cb, a);  col1[i2] = RGBAf(cr, cg, cb, a)
                     pts2[i2 - 1] = Point2d(X, 0.0);  pts2[i2] = Point2d(X, h)
-                    col2[i2 - 1] = RGBAf(cr, cg, cb, 1);  col2[i2] = RGBAf(cr, cg, cb, 1)
+                    col2[i2 - 1] = RGBAf(mr, mg, mb, 1);  col2[i2] = RGBAf(mr, mg, mb, 1)
                 end
                 lap("punkty i kolory ($nseg kresek)")
                 sg.pts1[] = pts1;  sg.col1[] = col1
@@ -792,7 +810,8 @@ function build_app()
         function warm_up!()
             warm_state[] == "idle" || return nothing
             warm_state[] = "running"
-            saved = (view = view_x[], Z = Zsel[], xs = xs_d.idx[], unit = unit_d.idx[], ion2 = ion2_cb.value[])
+            saved = (view = view_x[], Z = Zsel[], xs = xs_d.idx[], unit = unit_d.idx[], ion2 = ion2_cb.value[],
+                     T = T_sl.value[], thr = thr_sl.value[])
             step(f) = try
                 f()
             catch e
@@ -820,6 +839,15 @@ function build_app()
                 step(() -> (unit_d.idx[] = saved.unit))
                 step(() -> (ion2_cb.value[] = true))
                 step(() -> (ion2_cb.value[] = saved.ion2))
+                # suwak temperatury (przelicza natężenia LTE i udziały Sahy) oraz suwak zakresu jasności
+                for T in (8000, 12000, 4000)
+                    step(() -> (T_sl.value[] = T))
+                end
+                step(() -> (T_sl.value[] = saved.T))
+                for thr in (3.0, 5.0, 2.0)
+                    step(() -> (thr_sl.value[] = thr))
+                end
+                step(() -> (thr_sl.value[] = saved.thr))
                 # bogaty pierwiastek (dużo linii: większa pojemność wykresu), potem powrót
                 if 26 in ELEMENTS.Z
                     step(() -> set_element!(26))
@@ -842,20 +870,63 @@ function build_app()
         # zapis wykresu jako PNG: pobieramy obraz z canvasu WebGL w przeglądarce. WebGL czyści bufor rysowania po
         # wyświetleniu klatki, więc na chwilę podpinamy się pod requestAnimationFrame i robimy zrzut tuż po tym,
         # jak WGLMakie narysuje klatkę (pusty zrzut rozpoznajemy po rozmiarze i próbujemy w następnej klatce).
+        # Wariant "jasny": na czas zrzutu wykres przełącza się na jasny motyw (białe tło, czarne osie, ciemniejsze
+        # kreski), a po zrzucie (przeglądarka zwiększa licznik png_done) wraca do ciemnego.
         file_unit = Dict("nm" => "nm", "Å" => "A", "µm" => "um", "cm⁻¹" => "cm-1", "eV" => "eV")
-        on(png_btn.value) do _
+        png_done  = Observable(0)
+        export_token = Ref(0.0)
+
+        function apply_theme!(light)
+            fg = light ? :black : :white
+            fig.scene.backgroundcolor[] = light ? RGBAf(1, 1, 1, 1) : RGBAf(0.09, 0.09, 0.11, 1)
+            ax.backgroundcolor = light ? :white : :black
+            ax.xlabelcolor = fg;      ax.ylabelcolor = fg
+            ax.xticklabelcolor = fg;  ax.yticklabelcolor = fg
+            ax.xtickcolor = fg;       ax.ytickcolor = fg
+            ax.leftspinecolor = light ? :gray30 : :gray40
+            ax.bottomspinecolor = light ? :gray30 : :gray40
+            return nothing
+        end
+        function restore_theme!()
+            print_mode[] || return nothing
+            print_mode[] = false
+            apply_theme!(false)
+            request_redraw!()
+            return nothing
+        end
+        on(png_done) do _
+            restore_theme!()
+        end
+
+        function export_png!(light)
             sym = string(ELEMENTS.symbol[something(findfirst(==(Zsel[]), ELEMENTS.Z), 1)])
-            fname = "spektrus_$(sym)_$(get(file_unit, unit_x[], "nm")).png"
+            fname = "spektrus_$(sym)_$(get(file_unit, unit_x[], "nm"))$(light ? "_light" : "").png"
+            if light
+                print_mode[] = true
+                apply_theme!(true)
+                request_redraw!()            # przerysuj kreski w kolorach do druku
+                sleep(0.6)                   # daj przeglądarce czas na odebranie zmian
+                token = time()
+                export_token[] = token
+                @async begin                 # zabezpieczenie: wróć do ciemnego motywu, gdyby zrzut się nie udał
+                    sleep(10)
+                    export_token[] == token && restore_theme!()
+                end
+            end
             Bonito.evaljs(session, Bonito.js"""
                 (function () {
                     const canvas = document.querySelector('.sp-fig canvas');
-                    if (!canvas) { console.warn('PNG: nie znaleziono wykresu'); return; }
+                    const raf = window.requestAnimationFrame;
+                    let frames = 0, done = false;
+                    function restore() {
+                        done = true;
+                        window.requestAnimationFrame = raf;
+                        $(png_done).notify(($(png_done).value || 0) + 1);      // zakończono (także po błędzie)
+                    }
+                    if (!canvas) { console.warn('PNG: nie znaleziono wykresu'); restore(); return; }
                     const blank = document.createElement('canvas');
                     blank.width = canvas.width; blank.height = canvas.height;
                     const blankLen = blank.toDataURL('image/png').length;
-                    const raf = window.requestAnimationFrame;
-                    let frames = 0, done = false;
-                    function restore() { done = true; window.requestAnimationFrame = raf; }
                     function save(url) {
                         restore();
                         const a = document.createElement('a');
@@ -875,6 +946,15 @@ function build_app()
                     setTimeout(function () { if (!done) { restore(); console.warn('PNG: przekroczono czas oczekiwania'); } }, 5000);
                 })();
             """)
+            return nothing
+        end
+        on(png_btn.value) do _
+            @async export_png!(false)
+        end
+        for b in (pngl_a, pngl_b)
+            on(b.value) do _
+                @async export_png!(true)
+            end
         end
 
         # zmiana języka: odśwież napisy generowane w Julii (opis linii, pasek informacji, etykiety osi)
@@ -927,7 +1007,8 @@ function build_app()
                     lab("scale", ddv(scale_d)),
                     lab("reference", ddv(ref_d))),
                 row(Bonito.DOM.b(tr("g_merge")); mb = 4),
-                row(lab("threshold", thr_sl, val(thr_sl.value)),
+                row(Bonito.DOM.span(lbl("threshold"), thr_sl, val(thr_sl.value); title = tr("thresholdtip"),
+                                    style = "display:inline-flex;align-items:center;gap:6px;"),
                     lab("resol", res_sl, val(res_sl.value)),
                     lab("resolpx", rescb, px_sl, val(px_sl.value))),
                 row(Bonito.DOM.b(tr("g_look")); mb = 4),
@@ -963,6 +1044,7 @@ function build_app()
                 pair(about_a, about_b; w = length("ⓘ O programie") + 3),
                 Bonito.DOM.span(lang_btn; title = tr("langtip")),
                 Bonito.DOM.span(png_btn; title = tr("pngtip")),
+                Bonito.DOM.span(pair(pngl_a, pngl_b; w = length("💾 PNG jasny") + 3); title = tr("pnglight")),
                 Bonito.DOM.span(pair(warm_a, warm_b; w = length("🔥 Rozgrzej") + 3); title = tr("warmtip"),
                                 style = map(st -> st == "idle" ? "display:inline-block;" : "display:none;", warm_state)),
                 Bonito.DOM.span(lbl("warming");

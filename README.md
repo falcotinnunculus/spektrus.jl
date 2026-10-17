@@ -38,6 +38,7 @@ Pobieranie i `prepare_lines.jl` wystarczy powtórzyć tylko wtedy, gdy zmienia s
 - język interfejsu na starcie: `LANG_DEFAULT` (`"pl"` albo `"en"`); w aplikacji przełącza go przycisk PL | EN,
 - imię i nazwisko autora w oknie „O programie”: `AUTHOR`.
 - zapis wykresu: przycisk 💾 PNG pobiera obraz wykresu z przeglądarki (plik `spektrus_<symbol>_<jednostka>.png`).
+- „💾 PNG jasny” zapisuje wersję do druku (białe tło, czarne osie, ciemniejsze kreski; plik `..._light.png`); na ułamek sekundy wykres przełącza się na jasny motyw.
 
 ## Repozytorium
 
