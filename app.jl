@@ -15,8 +15,28 @@
 using Bonito, WGLMakie
 include(joinpath(@__DIR__, "Spektrus.jl"))
 using .Spektrus
+using Logging
 
-WGLMakie.activate!()
+# Zwykłe kliknięcie na wykresie (bez przeciągania) daje zaznaczenie o zerowej szerokości; Makie ignoruje je
+# i wypisuje ostrzeżenie "Rectangle zoom ignored". Jest nieszkodliwe, więc filtrujemy tylko tę jedną wiadomość.
+struct DropZoomWarn{L<:AbstractLogger} <: AbstractLogger
+    inner::L
+end
+Logging.min_enabled_level(l::DropZoomWarn) = Logging.min_enabled_level(l.inner)
+Logging.shouldlog(l::DropZoomWarn, args...) = Logging.shouldlog(l.inner, args...)
+Logging.catch_exceptions(l::DropZoomWarn) = Logging.catch_exceptions(l.inner)
+function Logging.handle_message(l::DropZoomWarn, level, message, _module, group, id, file, line; kwargs...)
+    occursin("Rectangle zoom ignored", string(message)) && return nothing
+    return Logging.handle_message(l.inner, level, message, _module, group, id, file, line; kwargs...)
+end
+global_logger(DropZoomWarn(global_logger()))
+
+# wykres wypełnia dostępne miejsce (rozmiar bierze z rodzica); starsze WGLMakie bez resize_to -> stały rozmiar
+try
+    WGLMakie.activate!(resize_to = :parent)
+catch
+    WGLMakie.activate!()
+end
 
 # ---- granice osi λ (zmień tutaj) ----
 const X_MIN       = 0.0       # dolna granica [nm], skala liniowa
@@ -24,6 +44,9 @@ const X_MIN_LOG   = 10.0      # dolna granica [nm], skala logarytmiczna (log(0) 
 const X_MAX       = 3000.0    # górna granica [nm]; dane NIST sięgają 2500 nm
 const X_MIN_WIDTH = 0.002     # najwęższe okno [nm] w skali liniowej (w logarytmicznej: 0,002 dekady)
 const RES_FLOOR   = 1e-4      # najmniejsza rozdzielczość zlewania linii [nm] (linie bliższe niż to uznajemy za tę samą)
+
+# autor tej wersji (wyświetlany w oknie "O programie" obok Claude'a) - wpisz swoje imię i nazwisko
+const AUTHOR = "WPISZ IMIĘ I NAZWISKO"
 
 const DF       = load_data()
 const ELEMENTS = element_list(DF)
@@ -115,7 +138,14 @@ function build_app()
         Zsel     = Observable(ELEMENTS.Z[z0])
         name_dd  = Bonito.Dropdown(NAME_OPTS; index = z0)
         sym_dd   = Bonito.Dropdown(SYM_OPTS; index = z0)
-        z_in     = Bonito.NumberInput(Float64(ELEMENTS.Z[z0]); min = 1, max = 99, step = 1)
+        # liczba atomowa: własne pole <input type=number> z Observable{Int} (Bonito.NumberInput istnieje tylko dla Float64)
+        z_val    = Observable(Int(ELEMENTS.Z[z0]))
+        z_in     = Bonito.DOM.input(; type = "number", value = z_val, min = 1, max = 99, step = 1,
+                                    style = "width:3.5em;padding:2px 4px;font-weight:600;font-size:0.9em;border-radius:3px;",
+                                    onchange = Bonito.js"""event => {
+                                        const v = Math.round(parseFloat(event.srcElement.value));
+                                        if (Number.isFinite(v) && $(z_val).value != v) { $(z_val).notify(v); }
+                                    }""")
         unit_dd  = Bonito.Dropdown(UNIT_OPTS)
         med_dd   = Bonito.Dropdown(["powietrze", "próżnia"])
         xs_dd    = Bonito.Dropdown(["liniowa", "logarytmiczna"])
@@ -435,15 +465,15 @@ function build_app()
         on(sym_dd.option_index) do i
             set_element!(ELEMENTS.Z[i])
         end
-        on(z_in.value) do v
-            (isfinite(v) && isinteger(v) && Int(v) in ELEMENTS.Z) && set_element!(Int(v))
+        on(z_val) do v
+            (v isa Integer || (v isa Real && isfinite(v) && isinteger(v))) && Int(v) in ELEMENTS.Z && set_element!(Int(v))
         end
         on(Zsel) do Z
             i = findfirst(==(Z), ELEMENTS.Z)
             i === nothing && return
             name_dd.option_index[] == i || (name_dd.option_index[] = i)
             sym_dd.option_index[] == i || (sym_dd.option_index[] = i)
-            z_in.value[] == Z || (z_in.value[] = Float64(Z))
+            z_val[] == Z || (z_val[] = Int(Z))
         end
 
         # powiększanie/pomniejszanie (factor) i przesuwanie (shift, ułamek nowej szerokości okna);
@@ -477,6 +507,7 @@ function build_app()
             o || return Bonito.DOM.div()
             Bonito.DOM.div(
                 Bonito.DOM.h3("Spektruś.jl"; style = "margin:0 0 6px 0;"),
+                Bonito.DOM.p(Bonito.DOM.b("Autorzy tej wersji: "), AUTHOR, " oraz Claude (Anthropic)."),
                 Bonito.DOM.p("Odtworzenie programu Spektruś 1.0 (Mikołaj Pytel, 2002) w Julii. " *
                              "Pokazuje widma emisyjne pierwiastków 1–99 w UV, świetle widzialnym i podczerwieni."),
                 Bonito.DOM.p("Dane linii spektralnych: ", Bonito.DOM.b("NIST Atomic Spectra Database"),
@@ -491,12 +522,30 @@ function build_app()
                              "może zaniżać U). Energie jonizacji: tabela z pakietu mendeleev (zgodna z NIST ASD w sprawdzonych " *
                              "przypadkach). Po wyłączeniu opcji Saha jasności linii różnych stopni jonizacji nie są " *
                              "porównywalne, a w obrębie jednego stopnia są."),
+                Bonito.DOM.p(Bonito.DOM.b("Źródła modelu fizycznego. "),
+                             "Rozkład Boltzmanna populacji poziomów, emisja optycznie cienka w LTE oraz równowaga jonizacji Saha " *
+                             "to standardowe elementy fizyki plazmy; opisano je m.in. w:"),
+                Bonito.DOM.ul(
+                    Bonito.DOM.li("H. R. Griem, ", Bonito.DOM.i("Principles of Plasma Spectroscopy"),
+                                  ", Cambridge University Press, 1997 (rozdz. 7: Thermodynamic equilibrium relations), ",
+                                  Bonito.DOM.a("strona książki";
+                                               href = "https://www.cambridge.org/core/books/principles-of-plasma-spectroscopy/90F6DBB512089B7E3AC121744EFE3D93",
+                                               target = "_blank", style = "color:#8cf;"), "."),
+                    Bonito.DOM.li("M. N. Saha, ", Bonito.DOM.i("Ionization in the solar chromosphere"),
+                                  ", Philosophical Magazine 40, 472 (1920), doi: ",
+                                  Bonito.DOM.a("10.1080/14786441008636148";
+                                               href = "https://doi.org/10.1080/14786441008636148",
+                                               target = "_blank", style = "color:#8cf;"), ".");
+                    style = "margin:4px 0 8px 0;padding-left:20px;"),
+                Bonito.DOM.p("Stała w równaniu Saha: 2(2π m_e k / h²)^{3/2} = 4,8294·10¹⁵ cm⁻³ K⁻³ᐟ² (stałe CODATA). " *
+                             "Model jest orientacyjny: zakłada LTE i optycznie cienką plazmę, które nie zawsze są spełnione."),
                 Bonito.DOM.p("Obsługa: kółko myszy = zoom, przeciągnięcie lewym = zaznaczenie obszaru, " *
                              "prawym = przesuwanie; przyciski ◀ ▶ ＋ － działają bez myszy. Jednostki osi: nm, Å, µm, cm⁻¹, eV " *
                              "(cm⁻¹ i eV nie zależą od ośrodka: liczone są z długości fali w próżni, a oś rośnie z energią; " *
                              "przełącznik powietrze/próżnia jest wtedy ukryty).");
                 style = "max-width:760px;margin:8px 0;padding:10px 14px;background:#222228;" *
-                        "border:1px solid #444;border-radius:6px;font-size:0.92em;line-height:1.4;")
+                        "border:1px solid #444;border-radius:6px;font-size:0.92em;line-height:1.4;" *
+                        "box-sizing:border-box;max-height:70vh;overflow:auto;")
         end
 
         for (b, (_, (lo, hi))) in zip(btns, RANGES)
@@ -602,54 +651,89 @@ function build_app()
         redraw!()    # pierwsze rysowanie
 
         # ---------------- układ strony ----------------
-        row(items...) = Bonito.DOM.div(items...;
-            style = "display:flex;flex-wrap:wrap;align-items:center;gap:16px;margin-bottom:8px;")
+        # Cała strona mieści się w oknie (bez przewijania, bo kółko myszy służy do zoomu):
+        # pasek narzędzi u góry, wykres zajmuje resztę wysokości, opis linii na dole.
+        # Rzadko używane ustawienia są w rozwijanym panelu "⚙ Ustawienia" (nakłada się na wykres).
+        css = Bonito.DOM.style("""
+            html, body { margin: 0 !important; overflow: hidden !important; }
+            .sp button { min-width: 0 !important; width: auto !important; padding: 3px 10px !important; margin: 0 !important; font-size: 0.9em !important; }
+            .sp select { padding: 2px 4px !important; font-size: 0.9em !important; }
+            .sp summary { cursor: pointer; user-select: none; padding: 3px 10px; border: 1px solid #666; border-radius: 4px; background: #2a2a31; }
+            .sp summary:hover { background: #35353d; }
+            .sp details[open] summary { background: #3a3a44; }
+            """)
+        row(items...; mb = 6) = Bonito.DOM.div(items...;
+            style = "display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:$(mb)px;")
         lab(text, items...) = Bonito.DOM.span(Bonito.DOM.span(text * " "), items...;
             style = "display:inline-flex;align-items:center;gap:6px;")
+        ion(rom, cb, tip) = Bonito.DOM.span(Bonito.DOM.span(rom), cb; title = tip,
+            style = "display:inline-flex;align-items:center;gap:3px;")
         val(obs) = Bonito.DOM.span(map(string, obs); style = "min-width:3em;")
+        grp(items...) = Bonito.DOM.span(items...; style = "display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;")
+        muted(text) = Bonito.DOM.span(text; style = "color:#9aa;font-size:0.85em;")
+
+        more = Bonito.DOM.details(
+            Bonito.DOM.summary("⚙ Ustawienia"),
+            Bonito.DOM.div(
+                row(Bonito.DOM.b("Oś"); mb = 4),
+                row(lab("Skala osi:", xs_dd),
+                    Bonito.DOM.span(Bonito.DOM.span("Długość fali: "), med_dd;
+                                    style = map(unit_dd.value) do v          # ukryty dla cm⁻¹ i eV (nie zależą od ośrodka)
+                                        k = UNIT_KEYS[something(findfirst(==(v), UNIT_OPTS), 1)]
+                                        unit_is_energy(k) ? "display:none;" : "display:inline-flex;align-items:center;gap:6px;"
+                                    end)),
+                row(Bonito.DOM.b("Natężenia"); mb = 4),
+                row(lab("Źródło:", src_dd),
+                    lab("Saha, lg n_e [cm⁻³]:", saha_cb, ne_sl, val(ne_sl.value)),
+                    lab("Skala:", scale_dd),
+                    lab("Odniesienie:", ref_dd)),
+                row(Bonito.DOM.b("Zlewanie linii"); mb = 4),
+                row(lab("Próg [dekady]:", thr_sl, val(thr_sl.value)),
+                    lab("Rozdzielczość [nm]:", res_sl, val(res_sl.value)),
+                    lab("lub zależna od zoomu [px]:", rescb, px_sl, val(px_sl.value))),
+                row(Bonito.DOM.b("Wygląd"); mb = 4),
+                row(lab("czarno-białe", bw_cb),
+                    lab("składowe zlanych linii w opisie", members_cb); mb = 0);
+                style = "position:absolute;left:12px;z-index:20;margin-top:4px;padding:10px 14px;" *
+                        "background:#1e1e24;border:1px solid #666;border-radius:6px;box-sizing:border-box;" *
+                        "width:max-content;max-width:calc(100vw - 24px);max-height:70vh;overflow:auto;" *
+                        "box-shadow:0 6px 20px rgba(0,0,0,0.6);");
+            style = "position:static;")
 
         return Bonito.DOM.div(
-            Bonito.DOM.h2("Spektruś.jl"; style = "margin:0 0 10px 0;"),
-            row(lab("Pierwiastek:", name_dd),
+            css,
+            row(Bonito.DOM.b("Spektruś.jl"; style = "font-size:1.2em;margin-right:6px;"),
+                lab("Pierwiastek:", name_dd),
                 lab("Symbol:", sym_dd),
-                lab("Liczba atomowa:", z_in)),
-            row(lab("Zakres:", btns...),
-                lab("Widok:", b_left, b_right, b_zin, b_zout),
-                lab("Jednostki:", unit_dd),
-                Bonito.DOM.span(Bonito.DOM.span("Długość fali: "), med_dd;
-                                style = map(unit_dd.value) do v          # ukryty dla cm⁻¹ i eV (nie zależą od ośrodka)
-                                    k = UNIT_KEYS[something(findfirst(==(v), UNIT_OPTS), 1)]
-                                    unit_is_energy(k) ? "display:none;" : "display:inline-flex;align-items:center;gap:6px;"
-                                end),
-                lab("Skala osi:", xs_dd)),
-            row(Bonito.DOM.span("Rysuj linie:"),
-                lab("niezjonizowane (I)", ion1_cb),
-                lab("zjonizowane (II)", ion2_cb),
-                lab("podwójnie (III)", ion3_cb),
-                lab("potrójnie (IV)", ion4_cb),
-                lab("poczwórnie (V)", ion5_cb),
-                lab("czarno-białe", bw_cb),
-                lab("składowe zlanych linii", members_cb),
-                about_btn),
-            Bonito.DOM.div(about_panel),
-            row(lab("Źródło natężeń:", src_dd),
+                lab("Z:", z_in),
+                grp(Bonito.DOM.span("Zakres:"), btns...),
+                grp(Bonito.DOM.span("Widok:"), b_left, b_right, b_zin, b_zout),
+                lab("Jednostki:", unit_dd)),
+            row(grp(Bonito.DOM.span("Linie:"),
+                    ion("I", ion1_cb, "atom niezjonizowany (X)"),
+                    muted("niezjonizowane"),
+                    muted("│"),
+                    muted("zjonizowane:"),
+                    ion("II", ion2_cb, "jednokrotnie zjonizowane (X⁺)"),
+                    ion("III", ion3_cb, "dwukrotnie zjonizowane (X²⁺)"),
+                    ion("IV", ion4_cb, "trzykrotnie zjonizowane (X³⁺)"),
+                    ion("V", ion5_cb, "czterokrotnie zjonizowane (X⁴⁺)")),
                 lab("T [K]:", T_sl, val(T_sl.value)),
-                lab("Saha, lg n_e [cm⁻³]:", saha_cb, ne_sl, val(ne_sl.value)),
-                lab("Skala natężeń:", scale_dd),
-                lab("Odniesienie:", ref_dd),
-                lab("Próg [dekady]:", thr_sl, val(thr_sl.value)),
-                lab("Rozdzielczość [nm]:", res_sl, val(res_sl.value)),
-                lab("lub zależna od zoomu [px]:", rescb, px_sl, val(px_sl.value))),
-            Bonito.DOM.div(fig),
-            Bonito.DOM.div(info; style = "margin-top:6px;color:#9aa;"),
+                more,
+                about_btn),
+            Bonito.DOM.div(Bonito.DOM.div(about_panel; style = "position:absolute;z-index:30;left:12px;right:12px;");
+                           style = "position:relative;height:0;"),
+            Bonito.DOM.div(fig; style = "flex:1 1 auto;min-height:0;position:relative;overflow:hidden;"),
+            Bonito.DOM.div(info; style = "margin-top:4px;color:#9aa;font-size:0.85em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"),
             Bonito.DOM.div(
-                Bonito.DOM.div("Opis linii spektralnych"; style = "font-weight:600;margin-bottom:4px;color:#9ab;"),
-                Bonito.DOM.div(summary; style = "min-height:1.4em;"),
-                Bonito.DOM.div(hover; style = "font-family:monospace;color:#bbb;min-height:1.4em;margin-top:2px;"),
-                Bonito.DOM.div(members_txt; style = "font-family:monospace;color:#bbb;white-space:pre;overflow-x:auto;margin-top:2px;"),
-                Bonito.DOM.div(hint; style = "color:#889;font-size:0.9em;min-height:1.2em;margin-top:2px;");
-                style = "margin-top:8px;padding:8px 12px;border:1px solid #444;border-radius:6px;");
-            style = "background:#161618;color:#ddd;font-family:system-ui,sans-serif;padding:14px;min-height:100vh;")
+                Bonito.DOM.div(summary; style = "min-height:1.3em;"),
+                Bonito.DOM.div(hover; style = "font-family:monospace;color:#bbb;min-height:1.3em;"),
+                Bonito.DOM.div(members_txt; style = "font-family:monospace;color:#bbb;white-space:pre;overflow:auto;max-height:6em;"),
+                Bonito.DOM.div(hint; style = "color:#889;font-size:0.9em;min-height:1.2em;");
+                style = "margin-top:4px;padding:4px 10px;border:1px solid #444;border-radius:6px;font-size:0.92em;flex:none;max-height:30vh;overflow:auto;");
+            class = "sp",
+            style = "position:relative;display:flex;flex-direction:column;height:100vh;box-sizing:border-box;overflow:hidden;" *
+                    "background:#161618;color:#ddd;font-family:system-ui,sans-serif;padding:8px 12px;")
     end
 end
 
