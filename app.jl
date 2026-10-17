@@ -184,9 +184,7 @@ const TR = Dict(
     "tip4"      => ("trzykrotnie zjonizowane (X³⁺)", "triply ionized (X³⁺)"),
     "tip5"      => ("czterokrotnie zjonizowane (X⁴⁺)", "quadruply ionized (X⁴⁺)"),
     "langtip"   => ("Język interfejsu: PL / EN", "Interface language: PL / EN"),
-    "pngtip"    => ("Zapisz wykres jako obraz PNG", "Save the plot as a PNG image"),
-    "pnglight"  => ("Zapisz PNG na jasnym tle (do druku): białe tło, czarne osie, ciemniejsze kreski",
-                    "Save a PNG on a light background (for printing): white background, black axes, darker lines"),
+    "save"      => ("💾 Zapisz obraz", "💾 Save image"),
     "warming"   => ("⏳ Rozgrzewanie…", "⏳ Warming up…"),
     "warmtip"   => ("Pierwsze użycie każdej funkcji kompiluje kod, co powoduje chwilowe lagi. Przycisk wykonuje przykładowe operacje " *
                     "(przesunięcia, powiększenia, skala, jednostki, suwaki temperatury i zakresu jasności, inny pierwiastek), potem przywraca ustawienia i znika.",
@@ -210,7 +208,7 @@ function dd2(opts_pl, opts_en; index = 1)
 end
 
 function build_app()
-    return Bonito.App() do session
+    return Bonito.App(title = "Spektruś.jl") do session
         # ---------------- kontrolki ----------------
         # pierwiastek: nazwa, symbol i liczba atomowa to trzy powiązane kontrolki (jedna wspólna wartość Zsel)
         z0       = something(findfirst(==(11), ELEMENTS.Z), 1)
@@ -268,9 +266,10 @@ function build_app()
         about_a  = Bonito.Button("ⓘ O programie")
         about_b  = Bonito.Button("ⓘ About")
         lang_btn = Bonito.Button("PL | EN")
-        png_btn  = Bonito.Button("💾 PNG")
-        pngl_a   = Bonito.Button("💾 PNG jasny")
-        pngl_b   = Bonito.Button("💾 PNG light")
+        pngd_a   = Bonito.Button("Ciemne tło (jak na ekranie)")
+        pngd_b   = Bonito.Button("Dark background (as on screen)")
+        pngl_a   = Bonito.Button("Jasne tło (do druku)")
+        pngl_b   = Bonito.Button("Light background (for printing)")
         warm_a   = Bonito.Button("🔥 Rozgrzej")
         warm_b   = Bonito.Button("🔥 Warm up")
         warm_state = Observable(WARMED[] ? "done" : "idle")        # "idle" -> "running" -> "done"
@@ -497,12 +496,12 @@ function build_app()
                     h = line_height(cl.I[k], Iref, decades; scale = scale)
                     X = to_X(cl.λ[k])
                     (cr, cg, cb) = bw ? (1.0, 1.0, 1.0) : wl2rgb(cl.λ[k])
-                    # główny wykres na jasnym tle (zapis do druku): czarne albo przyciemnione kreski; pasek tęczy zostaje czarny
+                    # zapis na jasnym tle (do druku): czarne albo przyciemnione kreski, w głównym wykresie i na pasku
                     (mr, mg, mb) = !print_mode[] ? (cr, cg, cb) : bw ? (0.0, 0.0, 0.0) : darken_for_light((cr, cg, cb))
-                    a = 0.15 + 0.85 * h
+                    a = print_mode[] ? 0.3 + 0.7 * h : 0.15 + 0.85 * h        # na bieli słabe linie bledną, więc podnosimy minimum
                     i2 = 2 * j
                     pts1[i2 - 1] = Point2d(X, 0.0);  pts1[i2] = Point2d(X, 1.0)
-                    col1[i2 - 1] = RGBAf(cr, cg, cb, a);  col1[i2] = RGBAf(cr, cg, cb, a)
+                    col1[i2 - 1] = RGBAf(mr, mg, mb, a);  col1[i2] = RGBAf(mr, mg, mb, a)
                     pts2[i2 - 1] = Point2d(X, 0.0);  pts2[i2] = Point2d(X, h)
                     col2[i2 - 1] = RGBAf(mr, mg, mb, 1);  col2[i2] = RGBAf(mr, mg, mb, 1)
                 end
@@ -880,6 +879,11 @@ function build_app()
             fg = light ? :black : :white
             fig.scene.backgroundcolor[] = light ? RGBAf(1, 1, 1, 1) : RGBAf(0.09, 0.09, 0.11, 1)
             ax.backgroundcolor = light ? :white : :black
+            ax_strip.backgroundcolor = light ? :white : :black
+            ax_strip.leftspinecolor = light ? :gray30 : :gray40
+            ax_strip.bottomspinecolor = light ? :gray30 : :gray40
+            ax_strip.topspinecolor = light ? :gray30 : :gray40
+            ax_strip.rightspinecolor = light ? :gray30 : :gray40
             ax.xlabelcolor = fg;      ax.ylabelcolor = fg
             ax.xticklabelcolor = fg;  ax.yticklabelcolor = fg
             ax.xtickcolor = fg;       ax.ytickcolor = fg
@@ -899,6 +903,7 @@ function build_app()
         end
 
         function export_png!(light)
+            Bonito.evaljs(session, Bonito.js"""document.querySelector('.sp-save').removeAttribute('open');""")   # zamknij menu
             sym = string(ELEMENTS.symbol[something(findfirst(==(Zsel[]), ELEMENTS.Z), 1)])
             fname = "spektrus_$(sym)_$(get(file_unit, unit_x[], "nm"))$(light ? "_light" : "").png"
             if light
@@ -948,8 +953,10 @@ function build_app()
             """)
             return nothing
         end
-        on(png_btn.value) do _
-            @async export_png!(false)
+        for b in (pngd_a, pngd_b)
+            on(b.value) do _
+                @async export_png!(false)
+            end
         end
         for b in (pngl_a, pngl_b)
             on(b.value) do _
@@ -1020,6 +1027,16 @@ function build_app()
                         "box-shadow:0 6px 20px rgba(0,0,0,0.6);");
             style = "position:static;")
 
+        save_menu = Bonito.DOM.details(
+            Bonito.DOM.summary(lbl("save")),
+            Bonito.DOM.div(
+                row(pair(pngd_a, pngd_b; w = length("Light background (for printing)") + 3); mb = 6),
+                row(pair(pngl_a, pngl_b; w = length("Light background (for printing)") + 3); mb = 0);
+                style = "position:absolute;left:12px;z-index:20;margin-top:4px;padding:10px 14px;" *
+                        "background:#1e1e24;border:1px solid #666;border-radius:6px;box-sizing:border-box;" *
+                        "width:max-content;max-width:calc(100vw - 24px);box-shadow:0 6px 20px rgba(0,0,0,0.6);");
+            class = "sp-save", style = "position:static;")
+
         return Bonito.DOM.div(
             css,
             row(Bonito.DOM.b("Spektruś.jl"; style = "font-size:1.2em;margin-right:6px;"),
@@ -1043,8 +1060,7 @@ function build_app()
                 more,
                 pair(about_a, about_b; w = length("ⓘ O programie") + 3),
                 Bonito.DOM.span(lang_btn; title = tr("langtip")),
-                Bonito.DOM.span(png_btn; title = tr("pngtip")),
-                Bonito.DOM.span(pair(pngl_a, pngl_b; w = length("💾 PNG jasny") + 3); title = tr("pnglight")),
+                save_menu,
                 Bonito.DOM.span(pair(warm_a, warm_b; w = length("🔥 Rozgrzej") + 3); title = tr("warmtip"),
                                 style = map(st -> st == "idle" ? "display:inline-block;" : "display:none;", warm_state)),
                 Bonito.DOM.span(lbl("warming");

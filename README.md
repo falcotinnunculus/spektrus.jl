@@ -37,8 +37,7 @@ Pobieranie i `prepare_lines.jl` wystarczy powtórzyć tylko wtedy, gdy zmienia s
 - wypisywanie czasów przerysowania w konsoli: `TIMING = true` (domyślnie wyłączone).
 - język interfejsu na starcie: `LANG_DEFAULT` (`"pl"` albo `"en"`); w aplikacji przełącza go przycisk PL | EN,
 - imię i nazwisko autora w oknie „O programie”: `AUTHOR`.
-- zapis wykresu: przycisk 💾 PNG pobiera obraz wykresu z przeglądarki (plik `spektrus_<symbol>_<jednostka>.png`).
-- „💾 PNG jasny” zapisuje wersję do druku (białe tło, czarne osie, ciemniejsze kreski; plik `..._light.png`); na ułamek sekundy wykres przełącza się na jasny motyw.
+- zapis wykresu: menu „💾 Zapisz obraz” pobiera wykres z przeglądarki jako PNG (`spektrus_<symbol>_<jednostka>.png`), w wersji z ciemnym tłem (jak na ekranie) albo z jasnym do druku (`..._light.png`: białe tło, czarne osie, ciemniejsze kreski; na ułamek sekundy wykres przełącza się wtedy na jasny motyw).
 
 ## Repozytorium
 
