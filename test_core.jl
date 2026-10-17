@@ -93,6 +93,15 @@ check("jednostki: konwersja w obie strony",
 check("nazwy: Na = Sód, Fe = Żelazo, Es = Einstein",
       element_name(11) == "Sód" && element_name(26) == "Żelazo" && element_name(99) == "Einstein")
 
+check("nazwy EN: Na = Sodium, Fe = Iron, Es = Einsteinium",
+      element_name(11; lang = "en") == "Sodium" && element_name(26; lang = "en") == "Iron" && element_name(99; lang = "en") == "Einsteinium")
+let i = findfirst(==(top.λ), na.lines.λ)
+    check("opis linii: domyślnie po polsku, lang = en po angielsku (zlane linie)",
+          occursin("zlane linie", describe_line(na.lines, i; n = 2)) && occursin("merged lines", describe_line(na.lines, i; n = 2, lang = "en")))
+    check("opis linii: tryb energii, EN = vacuum, PL = próżnia",
+          occursin("próżnia", describe_line(na.lines, i; unit = "eV")) && occursin("vacuum", describe_line(na.lines, i; unit = "eV", lang = "en")))
+end
+
 # --- opis linii ---
 println("\nPrzykład opisu: ", describe_line(na.lines, findfirst(==(top.λ), na.lines.λ)))
 

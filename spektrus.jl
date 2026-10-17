@@ -37,7 +37,9 @@ unit_text(λ, u) = u == "nm" ? "$(round(λ; digits = 3)) nm" : "$(round(unit_val
 
 # ---------------- polskie nazwy pierwiastków (indeks = liczba atomowa) ----------------
 const NAMES_PL = ["Wodór", "Hel", "Lit", "Beryl", "Bor", "Węgiel", "Azot", "Tlen", "Fluor", "Neon", "Sód", "Magnez", "Glin", "Krzem", "Fosfor", "Siarka", "Chlor", "Argon", "Potas", "Wapń", "Skand", "Tytan", "Wanad", "Chrom", "Mangan", "Żelazo", "Kobalt", "Nikiel", "Miedź", "Cynk", "Gal", "German", "Arsen", "Selen", "Brom", "Krypton", "Rubid", "Stront", "Itr", "Cyrkon", "Niob", "Molibden", "Technet", "Ruten", "Rod", "Pallad", "Srebro", "Kadm", "Ind", "Cyna", "Antymon", "Tellur", "Jod", "Ksenon", "Cez", "Bar", "Lantan", "Cer", "Prazeodym", "Neodym", "Promet", "Samar", "Europ", "Gadolin", "Terb", "Dysproz", "Holm", "Erb", "Tul", "Iterb", "Lutet", "Hafn", "Tantal", "Wolfram", "Ren", "Osm", "Iryd", "Platyna", "Złoto", "Rtęć", "Tal", "Ołów", "Bizmut", "Polon", "Astat", "Radon", "Frans", "Rad", "Aktyn", "Tor", "Protaktyn", "Uran", "Neptun", "Pluton", "Ameryk", "Kiur", "Berkel", "Kaliforn", "Einstein"]
-element_name(Z) = 1 <= Z <= length(NAMES_PL) ? NAMES_PL[Z] : string(Z)
+const NAMES_EN = ["Hydrogen", "Helium", "Lithium", "Beryllium", "Boron", "Carbon", "Nitrogen", "Oxygen", "Fluorine", "Neon", "Sodium", "Magnesium", "Aluminium", "Silicon", "Phosphorus", "Sulfur", "Chlorine", "Argon", "Potassium", "Calcium", "Scandium", "Titanium", "Vanadium", "Chromium", "Manganese", "Iron", "Cobalt", "Nickel", "Copper", "Zinc", "Gallium", "Germanium", "Arsenic", "Selenium", "Bromine", "Krypton", "Rubidium", "Strontium", "Yttrium", "Zirconium", "Niobium", "Molybdenum", "Technetium", "Ruthenium", "Rhodium", "Palladium", "Silver", "Cadmium", "Indium", "Tin", "Antimony", "Tellurium", "Iodine", "Xenon", "Caesium", "Barium", "Lanthanum", "Cerium", "Praseodymium", "Neodymium", "Promethium", "Samarium", "Europium", "Gadolinium", "Terbium", "Dysprosium", "Holmium", "Erbium", "Thulium", "Ytterbium", "Lutetium", "Hafnium", "Tantalum", "Tungsten", "Rhenium", "Osmium", "Iridium", "Platinum", "Gold", "Mercury", "Thallium", "Lead", "Bismuth", "Polonium", "Astatine", "Radon", "Francium", "Radium", "Actinium", "Thorium", "Protactinium", "Uranium", "Neptunium", "Plutonium", "Americium", "Curium", "Berkelium", "Californium", "Einsteinium"]
+"Nazwa pierwiastka: `lang = \"pl\"` (domyślnie) albo `\"en\"`."
+element_name(Z; lang = "pl") = (names = lang == "en" ? NAMES_EN : NAMES_PL; 1 <= Z <= length(names) ? names[Z] : string(Z))
 
 "Długość fali z próżni na powietrze (wzór Edlena/Mortona), tylko dla 200–2000 nm."
 function vac2air(λ)
@@ -321,15 +323,16 @@ end
 fmt(x) = ismissing(x) ? "?" : string(x)
 
 "Opis linii do podpowiedzi: pierwiastek, λ, przejście, Aki. `n` > 1 oznacza zlane linie."
-function describe_line(lines, row; n = 1, spread = 0.0, unit = "nm")
+function describe_line(lines, row; n = 1, spread = 0.0, unit = "nm", lang = "pl")
     r = lines[row, :]
     ion = ("I", "II", "III", "IV", "V")[clamp(r.ion, 1, 5)]
     lower = join(fmt.([r.conf_i, r.term_i, r.J_i]), " ")
     upper = join(fmt.([r.conf_k, r.term_k, r.J_k]), " ")
     spr = spread == 0 ? "0" : string(round(spread; sigdigits = 2))
-    extra = n > 1 ? "  (zlane linie: $n, rozrzut λ: $spr nm)" : ""
+    en = lang == "en"
+    extra = n > 1 ? (en ? "  (merged lines: $n, λ spread: $spr nm)" : "  (zlane linie: $n, rozrzut λ: $spr nm)") : ""
     wl = unit == "nm" ? unit_text(r.λ, "nm") :
-         unit_is_energy(unit) ? "$(round(r.λ; digits = 3)) nm (próżnia) = $(unit_text(r.λ, unit))" :
+         unit_is_energy(unit) ? "$(round(r.λ; digits = 3)) nm ($(en ? "vacuum" : "próżnia")) = $(unit_text(r.λ, unit))" :
          "$(round(r.λ; digits = 3)) nm = $(unit_text(r.λ, unit))"
     return "$(r.symbol) $ion  $wl   $lower → $upper   Aki = $(fmt(r.Aki)) s⁻¹$extra"
 end
@@ -339,7 +342,7 @@ Składowe zlanego klastra (wiersze `first:last` w `lines`), od najsilniejszej, p
 poziomy, Aki i udział w natężeniu klastra (długość fali tylko wtedy, gdy składowe się różnią).
 Pokazuje najwyżej `max` pozycji.
 """
-function describe_members(lines, first, last; max = 6)
+function describe_members(lines, first, last; max = 6, lang = "pl")
     rows = first:last
     total = sum(lines.I[rows])
     order = sortperm(lines.I[rows]; rev = true)
@@ -351,9 +354,9 @@ function describe_members(lines, first, last; max = 6)
         lower = join(fmt.([r.conf_i, r.term_i, r.J_i]), " ")
         upper = join(fmt.([r.conf_k, r.term_k, r.J_k]), " ")
         wl = differ ? "$(round(r.λ; digits = 4)) nm  " : ""
-        push!(out, "  $(wl)$lower → $upper   Aki = $(fmt(r.Aki)) s⁻¹   udział $(round(Int, 100 * r.I / total))%")
+        push!(out, "  $(wl)$lower → $upper   Aki = $(fmt(r.Aki)) s⁻¹   $(lang == "en" ? "share" : "udział") $(round(Int, 100 * r.I / total))%")
     end
-    length(order) > max && push!(out, "  … i $(length(order) - max) kolejnych")
+    length(order) > max && push!(out, "  … $(lang == "en" ? "and $(length(order) - max) more" : "i $(length(order) - max) kolejnych")")
     return join(out, "\n")
 end
 

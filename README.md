@@ -35,6 +35,8 @@ Pobieranie i `prepare_lines.jl` wystarczy powtórzyć tylko wtedy, gdy zmienia s
 - granice osi i najmniejsze okno zoomu: `X_MIN`, `X_MAX`, `X_MIN_WIDTH` (stałe na początku pliku),
 - najmniejsza rozdzielczość zlewania linii: `RES_FLOOR`,
 - wypisywanie czasów przerysowania w konsoli: `TIMING = true` (domyślnie wyłączone).
+- język interfejsu na starcie: `LANG_DEFAULT` (`"pl"` albo `"en"`); w aplikacji przełącza go przycisk PL | EN,
+- imię i nazwisko autora w oknie „O programie”: `AUTHOR`.
 
 ## Jednostki osi
 

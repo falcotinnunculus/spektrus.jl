@@ -50,14 +50,20 @@ const AUTHOR = "WPISZ IMIĘ I NAZWISKO"
 
 const DF       = load_data()
 const ELEMENTS = element_list(DF)
-const NAME_OPTS = [element_name(Z) for Z in ELEMENTS.Z]
+const NAME_OPTS_PL = [element_name(Z; lang = "pl") for Z in ELEMENTS.Z]
+const NAME_OPTS_EN = [element_name(Z; lang = "en") for Z in ELEMENTS.Z]
 const SYM_OPTS  = collect(String, ELEMENTS.symbol)
-const RANGES   = ["UV" => (100.0, 380.0), "widzialne" => (380.0, 780.0),
-                  "IR" => (780.0, 2500.0), "wszystko" => (100.0, 2500.0)]
+# zakresy: (napis PL, napis EN, (od, do) [nm])
+const RANGES   = [("UV", "UV", (100.0, 380.0)), ("widzialne", "visible", (380.0, 780.0)),
+                  ("IR", "IR", (780.0, 2500.0)), ("wszystko", "all", (100.0, 2500.0))]
+
+# język interfejsu na starcie: "pl" albo "en" (przełącza się przyciskiem PL/EN)
+const LANG_DEFAULT = "pl"
 
 # jednostki osi X: klucze (używane w kodzie) i napisy na liście
 const UNIT_KEYS = ["nm", "Å", "µm", "cm⁻¹", "eV"]
-const UNIT_OPTS = ["nanometry (nm)", "angstremy (Å)", "mikrometry (µm)", "liczba falowa (cm⁻¹)", "energia fotonu (eV)"]
+const UNIT_OPTS_PL = ["nanometry (nm)", "angstremy (Å)", "mikrometry (µm)", "liczba falowa (cm⁻¹)", "energia fotonu (eV)"]
+const UNIT_OPTS_EN = ["nanometers (nm)", "angstroms (Å)", "micrometers (µm)", "wavenumber (cm⁻¹)", "photon energy (eV)"]
 
 """
 Przycina okno [lo, hi] [nm] do granic osi, zachowując jego szerokość (przy przesuwaniu zatrzymuje się
@@ -114,8 +120,9 @@ function nice_ticks(lo, hi, logmode)
     return vals
 end
 
-# „1 linia spektralna”, „2 linie spektralne”, „5 linii spektralnych”
-function lines_pl(n)
+# PL: „1 linia spektralna”, „2 linie spektralne”, „5 linii spektralnych”; EN: „1 spectral line”, „2 spectral lines”
+function lines_txt(n, lang)
+    lang == "en" && return n == 1 ? "1 spectral line" : "$n spectral lines"
     n == 1 && return "1 linia spektralna"
     (2 <= n % 10 <= 4 && !(12 <= n % 100 <= 14)) && return "$n linie spektralne"
     return "$n linii spektralnych"
@@ -130,13 +137,77 @@ const ROMAN = ("I", "II", "III", "IV", "V")
 # udział procentowy: pełne procenty od 10% wzwyż, poniżej 2 cyfry znaczące
 fmt_pct(f) = f >= 0.1 ? "$(round(Int, 100f))%" : "$(round(100f; sigdigits = 2))%"
 
+# Napisy interfejsu (klucz => (PL, EN)). Napisy zmieniające się dynamicznie (opis linii, pasek informacji,
+# okno "O programie") są tłumaczone na miejscu przez L(pl, en) w build_app.
+const TR = Dict(
+    "element"   => ("Pierwiastek:", "Element:"),
+    "symbol"    => ("Symbol:", "Symbol:"),
+    "range"     => ("Zakres:", "Range:"),
+    "view"      => ("Widok:", "View:"),
+    "units"     => ("Jednostki:", "Units:"),
+    "lines"     => ("Linie:", "Lines:"),
+    "neutral"   => ("niezjonizowane", "neutral"),
+    "ionized"   => ("zjonizowane:", "ionized:"),
+    "settings"  => ("⚙ Ustawienia", "⚙ Settings"),
+    "g_axis"    => ("Oś", "Axis"),
+    "g_int"     => ("Natężenia", "Intensities"),
+    "g_merge"   => ("Zlewanie linii", "Line merging"),
+    "g_look"    => ("Wygląd", "Appearance"),
+    "axscale"   => ("Skala osi:", "Axis scale:"),
+    "medium"    => ("Długość fali:", "Wavelength:"),
+    "source"    => ("Źródło:", "Source:"),
+    "scale"     => ("Skala:", "Scale:"),
+    "reference" => ("Odniesienie:", "Reference:"),
+    "threshold" => ("Próg [dekady]:", "Threshold [decades]:"),
+    "resol"     => ("Rozdzielczość [nm]:", "Resolution [nm]:"),
+    "resolpx"   => ("lub zależna od zoomu [px]:", "or zoom-dependent [px]:"),
+    "bw"        => ("czarno-białe", "black and white"),
+    "members"   => ("składowe zlanych linii w opisie", "components of merged lines in the description"),
+    "tip1"      => ("atom niezjonizowany (X)", "neutral atom (X)"),
+    "tip2"      => ("jednokrotnie zjonizowane (X⁺)", "singly ionized (X⁺)"),
+    "tip3"      => ("dwukrotnie zjonizowane (X²⁺)", "doubly ionized (X²⁺)"),
+    "tip4"      => ("trzykrotnie zjonizowane (X³⁺)", "triply ionized (X³⁺)"),
+    "tip5"      => ("czterokrotnie zjonizowane (X⁴⁺)", "quadruply ionized (X⁴⁺)"),
+    "langtip"   => ("Język interfejsu: PL / EN", "Interface language: PL / EN"),
+)
+
+# Para list rozwijanych PL/EN o wspólnym indeksie (źródłem prawdy jest `idx`). Zmiana napisów na liście w
+# Bonito resetuje wybór, więc zamiast tego trzymamy obie wersje i pokazujemy jedną z nich.
+function dd2(opts_pl, opts_en; index = 1)
+    a = Bonito.Dropdown(opts_pl; index = index)
+    b = Bonito.Dropdown(opts_en; index = index)
+    on(a.option_index) do i
+        b.option_index[] == i || (b.option_index[] = i)
+    end
+    on(b.option_index) do i
+        a.option_index[] == i || (a.option_index[] = i)
+    end
+    w = maximum(length, vcat(collect(String, opts_pl), collect(String, opts_en))) + 4     # szerokość w "ch"
+    return (idx = a.option_index, a = a, b = b, w = w)
+end
+
 function build_app()
     return Bonito.App() do session
         # ---------------- kontrolki ----------------
         # pierwiastek: nazwa, symbol i liczba atomowa to trzy powiązane kontrolki (jedna wspólna wartość Zsel)
         z0       = something(findfirst(==(11), ELEMENTS.Z), 1)
         Zsel     = Observable(ELEMENTS.Z[z0])
-        name_dd  = Bonito.Dropdown(NAME_OPTS; index = z0)
+
+        # język interfejsu i pomocnicze funkcje tłumaczenia
+        lang = Observable(LANG_DEFAULT)
+        L(pl, en) = lang[] == "en" ? en : pl                       # tekst w bieżącym języku
+        tr(key) = map(l -> TR[key][l == "en" ? 2 : 1], lang)       # Observable napisu (zmienia się z językiem)
+        show_for(l) = map(x -> x == l ? "display:inline-flex;align-items:center;gap:6px;" : "display:none;", lang)
+        # dwie wersje kontrolki (PL i EN), widoczna jedna; `w` = minimalna szerokość [ch], taka sama w obu językach
+        pair(a, b; w = 0) = Bonito.DOM.span(Bonito.DOM.span(a; style = show_for("pl")),
+                                            Bonito.DOM.span(b; style = show_for("en"));
+                                            style = "display:inline-block;" * (w > 0 ? "min-width:$(w)ch;" : ""))
+        ddv(d) = pair(d.a, d.b; w = d.w)
+        # etykieta o stałej szerokości (najdłuższy z napisów PL/EN), żeby zmiana języka nie przesuwała kontrolek
+        lbl(key) = Bonito.DOM.span(tr(key);
+                                   style = "display:inline-block;min-width:$(maximum(length, TR[key]))ch;")
+
+        name_d   = dd2(NAME_OPTS_PL, NAME_OPTS_EN; index = z0)
         sym_dd   = Bonito.Dropdown(SYM_OPTS; index = z0)
         # liczba atomowa: własne pole <input type=number> z Observable{Int} (Bonito.NumberInput istnieje tylko dla Float64)
         z_val    = Observable(Int(ELEMENTS.Z[z0]))
@@ -146,12 +217,13 @@ function build_app()
                                         const v = Math.round(parseFloat(event.srcElement.value));
                                         if (Number.isFinite(v) && $(z_val).value != v) { $(z_val).notify(v); }
                                     }""")
-        unit_dd  = Bonito.Dropdown(UNIT_OPTS)
-        med_dd   = Bonito.Dropdown(["powietrze", "próżnia"])
-        xs_dd    = Bonito.Dropdown(["liniowa", "logarytmiczna"])
-        scale_dd = Bonito.Dropdown(["logarytmiczna", "liniowa"])
-        src_dd   = Bonito.Dropdown(["model LTE", "NIST"])
-        ref_dd   = Bonito.Dropdown(["linia widzialna", "linia w oknie", "linia pierwiastka"])
+        unit_d   = dd2(UNIT_OPTS_PL, UNIT_OPTS_EN)
+        med_d    = dd2(["powietrze", "próżnia"], ["air", "vacuum"])
+        xs_d     = dd2(["liniowa", "logarytmiczna"], ["linear", "logarithmic"])
+        scale_d  = dd2(["logarytmiczna", "liniowa"], ["logarithmic", "linear"])
+        src_d    = dd2(["model LTE", "NIST"], ["LTE model", "NIST"])
+        ref_d    = dd2(["linia widzialna", "linia w oknie", "linia pierwiastka"],
+                       ["visible-range line", "line in window", "element line"])
         ion1_cb  = Bonito.Checkbox(true)                     # linie niezjonizowane (I)
         ion2_cb  = Bonito.Checkbox(false)                    # linie zjonizowane (II)
         ion3_cb  = Bonito.Checkbox(false)                    # podwójnie zjonizowane (III)
@@ -166,16 +238,17 @@ function build_app()
         thr_sl   = Bonito.Slider(0.5:0.1:6.0; value = 4.0)
         rescb    = Bonito.Checkbox(false)                    # rozdzielczość zależna od zoomu
         px_sl    = Bonito.Slider(1:10; value = 2)            # ... w pikselach ekranu
-        btns     = [Bonito.Button(name) for (name, _) in RANGES]
         b_left   = Bonito.Button("◀")
         b_right  = Bonito.Button("▶")
         b_zin    = Bonito.Button("＋")
         b_zout   = Bonito.Button("－")
-        about_btn = Bonito.Button("ⓘ O programie")
+        about_a  = Bonito.Button("ⓘ O programie")
+        about_b  = Bonito.Button("ⓘ About")
+        lang_btn = Bonito.Button("PL | EN")
         about_open = Observable(false)
 
         info  = Observable("")
-        hover = Observable("Najedź kursorem na linię.")
+        hover = Observable(L("Najedź kursorem na linię.", "Hover over a line."))
         summary = Observable("")      # „N linii spektralnych o względnej sumie natężeń X”
         hint    = Observable("")      # podpowiedź o zaznaczaniu i powiększaniu
         members_txt = Observable("")  # składowe zlanych linii (gdy włączone)
@@ -303,10 +376,13 @@ function build_app()
         # podpowiedź pod opisem zlanych linii: tylko wtedy, gdy coś jeszcze da się rozdzielić
         function merge_hint(n, spread)
             n > 1 || return ""
-            spread == 0 && return "Te linie mają identyczną długość fali w danych, więc nie da się ich rozdzielić."
+            spread == 0 && return L("Te linie mają identyczną długość fali w danych, więc nie da się ich rozdzielić.",
+                                    "These lines have identical wavelengths in the data, so they cannot be resolved.")
             cur_res[] <= RES_FLOOR * 1.001 && return ""          # najdrobniejsza rozdzielczość: nic już nie rozdzieli
-            rescb.value[] && return "Możesz zaznaczyć i powiększyć ten wycinek w celu zwiększenia rozdzielczości."
-            return "Zmniejsz rozdzielczość (suwak) albo włącz jej zależność od zoomu, żeby rozdzielić te linie."
+            rescb.value[] && return L("Możesz zaznaczyć i powiększyć ten wycinek w celu zwiększenia rozdzielczości.",
+                                      "You can select and zoom into this section to increase the resolution.")
+            return L("Zmniejsz rozdzielczość (suwak) albo włącz jej zależność od zoomu, żeby rozdzielić te linie.",
+                     "Decrease the resolution (slider) or make it zoom-dependent to resolve these lines.")
         end
         function set_summary!(sum_txt, hint_txt)
             summary[] == sum_txt || (summary[] = sum_txt)
@@ -319,11 +395,11 @@ function build_app()
             redrawing[] = true
             try
                 Z      = Zsel[]
-                medium = med_dd.value[] == "powietrze" ? "air" : "vac"
-                source = src_dd.value[] == "model LTE" ? "lte" : "nist"
-                scale  = scale_dd.value[] == "logarytmiczna" ? "log" : "lin"
-                refmode = ref_dd.value[] == "linia w oknie" ? "window" :
-                          ref_dd.value[] == "linia pierwiastka" ? "all" : "visible"
+                medium = med_d.idx[] == 1 ? "air" : "vac"
+                source = src_d.idx[] == 1 ? "lte" : "nist"
+                scale  = scale_d.idx[] == 1 ? "log" : "lin"
+                refmode = ref_d.idx[] == 2 ? "window" :
+                          ref_d.idx[] == 3 ? "all" : "visible"
                 T       = Float64(T_sl.value[])
                 decades = Float64(thr_sl.value[])
                 ions    = Int[]
@@ -335,8 +411,8 @@ function build_app()
                 saha    = saha_cb.value[]
                 ne_exp  = Float64(ne_sl.value[])
                 bw      = bw_cb.value[]
-                logmode = xs_dd.value[] == "logarytmiczna"
-                unit_key = UNIT_KEYS[something(findfirst(==(unit_dd.value[]), UNIT_OPTS), 1)]
+                logmode = xs_d.idx[] == 2
+                unit_key = UNIT_KEYS[clamp(unit_d.idx[], 1, length(UNIT_KEYS))]
                 energy   = unit_is_energy(unit_key)
                 energy && (medium = "vac")      # cm⁻¹ i eV: zawsze długości fali w próżni
                 log_x[]  = logmode
@@ -394,10 +470,12 @@ function build_app()
                 sg.pts1[] = pts1;  sg.col1[] = col1
                 sg.pts2[] = pts2;  sg.col2[] = col2
                 lap("aktualizacja danych wykresów")
-                xlabel_txt = unit_key == "cm⁻¹" ? "liczba falowa σ = 1/λ [cm⁻¹]" :
-                             unit_key == "eV" ? "energia fotonu [eV]" :
-                             "λ [$unit_key, $(medium == "air" ? "powietrze" : "próżnia")]"
+                xlabel_txt = unit_key == "cm⁻¹" ? L("liczba falowa σ = 1/λ [cm⁻¹]", "wavenumber σ = 1/λ [cm⁻¹]") :
+                             unit_key == "eV" ? L("energia fotonu [eV]", "photon energy [eV]") :
+                             "λ [$unit_key, $(medium == "air" ? L("powietrze", "air") : L("próżnia", "vacuum"))]"
                 ax.xlabel[] == xlabel_txt || (ax.xlabel = xlabel_txt)
+                ylabel_txt = L("natężenie względne", "relative intensity")
+                ax.ylabel[] == ylabel_txt || (ax.ylabel = ylabel_txt)
                 xa, xb = view_to_X((x0, x1))
                 xlims!(ax, xa, xb)
                 ax.xticks = ticks_for(x0, x1)
@@ -409,14 +487,19 @@ function build_app()
                            first = cl.first[idx], last = cl.last[idx], lines = lines)
                 frac = cache[].spec.fractions
                 saha_txt = frac === nothing ? "" :
-                    ", Saha: lg n_e = $(round(ne_exp; digits = 1)), udziały " *
+                    ", Saha: lg n_e = $(round(ne_exp; digits = 1)), $(L("udziały", "fractions")) " *
                     join(["$(ROMAN[z]) $(fmt_pct(frac[z]))" for z in eachindex(frac) if frac[z] >= 0.0005], ", ")
-                src_txt = isempty(lines.I) ? "brak linii (dla wybranych stopni jonizacji nie ma danych)" :
-                          use_lte ? "model LTE, T = $(Int(T)) K$saha_txt" :
-                          (source == "lte" ? "NIST (brak Aki dla tego pierwiastka, LTE niedostępny)" : "NIST")
-                info[] = "Linie widoczne: $(length(idx)) z $(length(cl.λ)) (całe widmo)   ·   " *
-                         "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))   ·   " *
-                         "rozdzielczość: $(round(res; sigdigits = 2)) nm"
+                src_txt = isempty(lines.I) ? L("brak linii (dla wybranych stopni jonizacji nie ma danych)",
+                                               "no lines (no data for the selected ionization stages)") :
+                          use_lte ? L("model LTE", "LTE model") * ", T = $(Int(T)) K$saha_txt" :
+                          (source == "lte" ? L("NIST (brak Aki dla tego pierwiastka, LTE niedostępny)",
+                                               "NIST (no Aki for this element, LTE unavailable)") : "NIST")
+                info[] = L("Linie widoczne: $(length(idx)) z $(length(cl.λ)) (całe widmo)   ·   " *
+                           "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))   ·   " *
+                           "rozdzielczość: $(round(res; sigdigits = 2)) nm",
+                           "Visible lines: $(length(idx)) of $(length(cl.λ)) (whole spectrum)   ·   " *
+                           "intensity source: $src_txt   ·   brightness reference: $(round(Iref; sigdigits = 3))   ·   " *
+                           "resolution: $(round(res; sigdigits = 2)) nm")
                 lap("info")
                 TIMING && println("  [redraw] ", rpad("RAZEM (strona Julii)", 34),
                                   lpad(round(Int, 1000 * (time() - t_start)), 6), " ms")
@@ -447,7 +530,7 @@ function build_app()
         end
 
         # ---------------- reakcje ----------------
-        onany(Zsel, unit_dd.value, med_dd.value, xs_dd.value, scale_dd.value, src_dd.value, ref_dd.value,
+        onany(Zsel, unit_d.idx, med_d.idx, xs_d.idx, scale_d.idx, src_d.idx, ref_d.idx,
               ion1_cb.value, ion2_cb.value, ion3_cb.value, ion4_cb.value, ion5_cb.value,
               saha_cb.value, ne_sl.value, bw_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
             request_redraw!()
@@ -459,7 +542,7 @@ function build_app()
             Z == Zsel[] || (Zsel[] = Z)
             return nothing
         end
-        on(name_dd.option_index) do i
+        on(name_d.idx) do i
             set_element!(ELEMENTS.Z[i])
         end
         on(sym_dd.option_index) do i
@@ -471,7 +554,7 @@ function build_app()
         on(Zsel) do Z
             i = findfirst(==(Z), ELEMENTS.Z)
             i === nothing && return
-            name_dd.option_index[] == i || (name_dd.option_index[] = i)
+            name_d.idx[] == i || (name_d.idx[] = i)
             sym_dd.option_index[] == i || (sym_dd.option_index[] = i)
             z_val[] == Z || (z_val[] = Int(Z))
         end
@@ -500,35 +583,55 @@ function build_app()
         end
 
         # okno „O programie” (przełączane przyciskiem)
-        on(about_btn.value) do _
-            about_open[] = !about_open[]
+        for b in (about_a, about_b)
+            on(b.value) do _
+                about_open[] = !about_open[]
+            end
         end
-        about_panel = map(about_open) do o
+        on(lang_btn.value) do _
+            lang[] = lang[] == "en" ? "pl" : "en"
+        end
+        about_panel = map(about_open, lang) do o, _l
             o || return Bonito.DOM.div()
             Bonito.DOM.div(
                 Bonito.DOM.h3("Spektruś.jl"; style = "margin:0 0 6px 0;"),
-                Bonito.DOM.p(Bonito.DOM.b("Autorzy tej wersji: "), AUTHOR, " oraz Claude (Anthropic)."),
-                Bonito.DOM.p("Odtworzenie programu Spektruś 1.0 (Mikołaj Pytel, 2002) w Julii. " *
-                             "Pokazuje widma emisyjne pierwiastków 1–99 w UV, świetle widzialnym i podczerwieni."),
-                Bonito.DOM.p("Dane linii spektralnych: ", Bonito.DOM.b("NIST Atomic Spectra Database"),
-                             " (stopnie jonizacji I–V, 100–2500 nm). Prosimy cytować: A. Kramida, Yu. Ralchenko, J. Reader " *
-                             "i NIST ASD Team, NIST Atomic Spectra Database, ",
+                Bonito.DOM.p(Bonito.DOM.b(L("Autorzy tej wersji: ", "Authors of this version: ")), AUTHOR,
+                             L(" oraz Claude (Anthropic).", " and Claude (Anthropic).")),
+                Bonito.DOM.p(L("Odtworzenie programu Spektruś 1.0 (Mikołaj Pytel, 2002) w Julii. " *
+                               "Pokazuje widma emisyjne pierwiastków 1–99 w UV, świetle widzialnym i podczerwieni.",
+                               "A recreation of the program Spektruś 1.0 (Mikołaj Pytel, 2002) in Julia. " *
+                               "It shows the emission spectra of elements 1–99 in the UV, visible and infrared.")),
+                Bonito.DOM.p(L("Dane linii spektralnych: ", "Spectral line data: "), Bonito.DOM.b("NIST Atomic Spectra Database"),
+                             L(" (stopnie jonizacji I–V, 100–2500 nm). Prosimy cytować: A. Kramida, Yu. Ralchenko, J. Reader " *
+                               "i NIST ASD Team, NIST Atomic Spectra Database, ",
+                               " (ionization stages I–V, 100–2500 nm). Please cite: A. Kramida, Yu. Ralchenko, J. Reader " *
+                               "and NIST ASD Team, NIST Atomic Spectra Database, "),
                              Bonito.DOM.a("https://physics.nist.gov/asd"; href = "https://physics.nist.gov/asd",
                                           target = "_blank", style = "color:#8cf;"), "."),
-                Bonito.DOM.p("Natężenia: model LTE, emisja optycznie cienka, I ∝ (N_z/N)·g_k·A_ki·ν·exp(−E_k/kT)/U_z(T) " *
-                             "(temperatura z suwaka T). Udziały stopni jonizacji N_z/N wynikają z równowagi Saha dla " *
-                             "gęstości elektronowej n_e (suwak lg n_e); uwzględniono stopnie I–V. Funkcje podziału U_z liczone " *
-                             "są z poziomów występujących w pobranych liniach, więc to przybliżenie (dla złożonych atomów " *
-                             "może zaniżać U). Energie jonizacji: tabela z pakietu mendeleev (zgodna z NIST ASD w sprawdzonych " *
-                             "przypadkach). Po wyłączeniu opcji Saha jasności linii różnych stopni jonizacji nie są " *
-                             "porównywalne, a w obrębie jednego stopnia są."),
-                Bonito.DOM.p(Bonito.DOM.b("Źródła modelu fizycznego. "),
-                             "Rozkład Boltzmanna populacji poziomów, emisja optycznie cienka w LTE oraz równowaga jonizacji Saha " *
-                             "to standardowe elementy fizyki plazmy; opisano je m.in. w:"),
+                Bonito.DOM.p(L("Natężenia: model LTE, emisja optycznie cienka, I ∝ (N_z/N)·g_k·A_ki·ν·exp(−E_k/kT)/U_z(T) " *
+                               "(temperatura z suwaka T). Udziały stopni jonizacji N_z/N wynikają z równowagi Saha dla " *
+                               "gęstości elektronowej n_e (suwak lg n_e); uwzględniono stopnie I–V. Funkcje podziału U_z liczone " *
+                               "są z poziomów występujących w pobranych liniach, więc to przybliżenie (dla złożonych atomów " *
+                               "może zaniżać U). Energie jonizacji: tabela z pakietu mendeleev (zgodna z NIST ASD w sprawdzonych " *
+                               "przypadkach). Po wyłączeniu opcji Saha jasności linii różnych stopni jonizacji nie są " *
+                               "porównywalne, a w obrębie jednego stopnia są.",
+                               "Intensities: LTE model, optically thin emission, I ∝ (N_z/N)·g_k·A_ki·ν·exp(−E_k/kT)/U_z(T) " *
+                               "(temperature from the T slider). The ionization stage fractions N_z/N come from the Saha equilibrium " *
+                               "for the electron density n_e (lg n_e slider); stages I–V are included. The partition functions U_z " *
+                               "are computed from the levels that appear in the downloaded lines, so this is an approximation " *
+                               "(for complex atoms it may underestimate U). Ionization energies: a table from the mendeleev package " *
+                               "(consistent with NIST ASD in the cases checked). With the Saha option off, the brightnesses of lines " *
+                               "of different ionization stages are not comparable, while within a single stage they are.")),
+                Bonito.DOM.p(Bonito.DOM.b(L("Źródła modelu fizycznego. ", "Sources of the physical model. ")),
+                             L("Rozkład Boltzmanna populacji poziomów, emisja optycznie cienka w LTE oraz równowaga jonizacji Saha " *
+                               "to standardowe elementy fizyki plazmy; opisano je m.in. w:",
+                               "The Boltzmann distribution of level populations, optically thin emission in LTE and the Saha " *
+                               "ionization equilibrium are standard elements of plasma physics; they are described, among others, in:")),
                 Bonito.DOM.ul(
                     Bonito.DOM.li("H. R. Griem, ", Bonito.DOM.i("Principles of Plasma Spectroscopy"),
-                                  ", Cambridge University Press, 1997 (rozdz. 7: Thermodynamic equilibrium relations), ",
-                                  Bonito.DOM.a("strona książki";
+                                  L(", Cambridge University Press, 1997 (rozdz. 7: Thermodynamic equilibrium relations), ",
+                                    ", Cambridge University Press, 1997 (ch. 7: Thermodynamic equilibrium relations), "),
+                                  Bonito.DOM.a(L("strona książki", "book page");
                                                href = "https://www.cambridge.org/core/books/principles-of-plasma-spectroscopy/90F6DBB512089B7E3AC121744EFE3D93",
                                                target = "_blank", style = "color:#8cf;"), "."),
                     Bonito.DOM.li("M. N. Saha, ", Bonito.DOM.i("Ionization in the solar chromosphere"),
@@ -537,22 +640,34 @@ function build_app()
                                                href = "https://doi.org/10.1080/14786441008636148",
                                                target = "_blank", style = "color:#8cf;"), ".");
                     style = "margin:4px 0 8px 0;padding-left:20px;"),
-                Bonito.DOM.p("Stała w równaniu Saha: 2(2π m_e k / h²)^{3/2} = 4,8294·10¹⁵ cm⁻³ K⁻³ᐟ² (stałe CODATA). " *
-                             "Model jest orientacyjny: zakłada LTE i optycznie cienką plazmę, które nie zawsze są spełnione."),
-                Bonito.DOM.p("Obsługa: kółko myszy = zoom, przeciągnięcie lewym = zaznaczenie obszaru, " *
-                             "prawym = przesuwanie; przyciski ◀ ▶ ＋ － działają bez myszy. Jednostki osi: nm, Å, µm, cm⁻¹, eV " *
-                             "(cm⁻¹ i eV nie zależą od ośrodka: liczone są z długości fali w próżni, a oś rośnie z energią; " *
-                             "przełącznik powietrze/próżnia jest wtedy ukryty).");
+                Bonito.DOM.p(L("Stała w równaniu Saha: 2(2π m_e k / h²)^{3/2} = 4,8294·10¹⁵ cm⁻³ K⁻³ᐟ² (stałe CODATA). " *
+                               "Model jest orientacyjny: zakłada LTE i optycznie cienką plazmę, które nie zawsze są spełnione.",
+                               "Constant in the Saha equation: 2(2π m_e k / h²)^{3/2} = 4.8294·10¹⁵ cm⁻³ K⁻³ᐟ² (CODATA constants). " *
+                               "The model is approximate: it assumes LTE and an optically thin plasma, which are not always satisfied.")),
+                Bonito.DOM.p(L("Obsługa: kółko myszy = zoom, przeciągnięcie lewym = zaznaczenie obszaru, " *
+                               "prawym = przesuwanie; przyciski ◀ ▶ ＋ － działają bez myszy. Jednostki osi: nm, Å, µm, cm⁻¹, eV " *
+                               "(cm⁻¹ i eV nie zależą od ośrodka: liczone są z długości fali w próżni, a oś rośnie z energią; " *
+                               "przełącznik powietrze/próżnia jest wtedy ukryty).",
+                               "Controls: mouse wheel = zoom, drag with the left button = select an area to zoom into, " *
+                               "right button = pan; the buttons ◀ ▶ ＋ － work without a mouse. Axis units: nm, Å, µm, cm⁻¹, eV " *
+                               "(cm⁻¹ and eV do not depend on the medium: they are computed from vacuum wavelengths and the axis " *
+                               "increases with energy; the air/vacuum switch is then hidden)."));
                 style = "max-width:760px;margin:8px 0;padding:10px 14px;background:#222228;" *
                         "border:1px solid #444;border-radius:6px;font-size:0.92em;line-height:1.4;" *
                         "box-sizing:border-box;max-height:70vh;overflow:auto;")
         end
 
-        for (b, (_, (lo, hi))) in zip(btns, RANGES)
-            on(b.value) do _
-                view_x[] = (lo, hi)
-                request_redraw!()
+        range_nodes = Any[]
+        for (name_pl, name_en, (lo, hi)) in RANGES
+            ba = Bonito.Button(name_pl)
+            bb = Bonito.Button(name_en)
+            for b in (ba, bb)
+                on(b.value) do _
+                    view_x[] = (lo, hi)
+                    request_redraw!()
+                end
             end
+            push!(range_nodes, pair(ba, bb; w = max(length(name_pl), length(name_en)) + 3))
         end
 
         # zakres ustawiony myszą (zoom/przesuwanie): zapamiętujemy go i pilnujemy granic osi
@@ -571,7 +686,7 @@ function build_app()
             end
             view_x[] = (clo, chi)
             ax.xticks = ticks_for(clo, chi)
-            (ref_dd.value[] == "linia w oknie" || rescb.value[]) && schedule_redraw!()
+            (ref_d.idx[] == 2 || rescb.value[]) && schedule_redraw!()
         end
 
         # podpowiedź po najechaniu na linię
@@ -583,7 +698,7 @@ function build_app()
             end
             λs = s.λ
             if isempty(λs)
-                set_hover!("Brak widocznych linii.")
+                set_hover!(L("Brak widocznych linii.", "No visible lines."))
                 set_summary!("", "")
                 set_members!("")
                 return
@@ -596,12 +711,12 @@ function build_app()
             cand = [i for i in (k - 1, k) if 1 <= i <= length(λs)]
             i = cand[argmin([abs(to_X(λs[j]) - mX) for j in cand])]
             if abs(to_X(λs[i]) - mX) <= tol
-                set_hover!(describe_line(s.lines, s.rows[i]; n = s.n[i], spread = s.spread[i], unit = unit_x[]))
-                set_summary!("$(lines_pl(s.n[i])) o względnej sumie natężeń $(fmt_rel(100 * s.I[i] / s.Iref))",
+                set_hover!(describe_line(s.lines, s.rows[i]; n = s.n[i], spread = s.spread[i], unit = unit_x[], lang = lang[]))
+                set_summary!("$(lines_txt(s.n[i], lang[])) $(L("o względnej sumie natężeń", "with a relative intensity sum of")) $(fmt_rel(100 * s.I[i] / s.Iref))",
                              merge_hint(s.n[i], s.spread[i]))
-                set_members!(members_cb.value[] && s.n[i] > 1 ? describe_members(s.lines, s.first[i], s.last[i]) : "")
+                set_members!(members_cb.value[] && s.n[i] > 1 ? describe_members(s.lines, s.first[i], s.last[i]; lang = lang[]) : "")
             else
-                set_hover!("Najedź kursorem na linię.")
+                set_hover!(L("Najedź kursorem na linię.", "Hover over a line."))
                 set_summary!("", "")
                 set_members!("")
             end
@@ -648,6 +763,14 @@ function build_app()
             sel_vis[] || (sel_vis[] = true)
         end
 
+        # zmiana języka: odśwież napisy generowane w Julii (opis linii, pasek informacji, etykiety osi)
+        on(lang) do _
+            set_hover!(L("Najedź kursorem na linię.", "Hover over a line."))
+            set_summary!("", "")
+            set_members!("")
+            request_redraw!()
+        end
+
         redraw!()    # pierwsze rysowanie
 
         # ---------------- układ strony ----------------
@@ -664,36 +787,38 @@ function build_app()
             """)
         row(items...; mb = 6) = Bonito.DOM.div(items...;
             style = "display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:$(mb)px;")
-        lab(text, items...) = Bonito.DOM.span(Bonito.DOM.span(text * " "), items...;
+        lab(key, items...) = Bonito.DOM.span(lbl(key), items...;                     # key: klucz w TR
             style = "display:inline-flex;align-items:center;gap:6px;")
-        ion(rom, cb, tip) = Bonito.DOM.span(Bonito.DOM.span(rom), cb; title = tip,
+        ion(rom, cb, tipkey) = Bonito.DOM.span(Bonito.DOM.span(rom), cb; title = tr(tipkey),
             style = "display:inline-flex;align-items:center;gap:3px;")
         val(obs) = Bonito.DOM.span(map(string, obs); style = "min-width:3em;")
         grp(items...) = Bonito.DOM.span(items...; style = "display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;")
-        muted(text) = Bonito.DOM.span(text; style = "color:#9aa;font-size:0.85em;")
+        muted(key) = Bonito.DOM.span(haskey(TR, key) ? lbl(key) : key;     # klucz w TR albo gotowy tekst (np. "│")
+                                     style = "color:#9aa;font-size:0.85em;")
 
         more = Bonito.DOM.details(
-            Bonito.DOM.summary("⚙ Ustawienia"),
+            Bonito.DOM.summary(lbl("settings")),
             Bonito.DOM.div(
-                row(Bonito.DOM.b("Oś"); mb = 4),
-                row(lab("Skala osi:", xs_dd),
-                    Bonito.DOM.span(Bonito.DOM.span("Długość fali: "), med_dd;
-                                    style = map(unit_dd.value) do v          # ukryty dla cm⁻¹ i eV (nie zależą od ośrodka)
-                                        k = UNIT_KEYS[something(findfirst(==(v), UNIT_OPTS), 1)]
+                row(Bonito.DOM.b(tr("g_axis")); mb = 4),
+                row(lab("axscale", ddv(xs_d)),
+                    Bonito.DOM.span(lbl("medium"), ddv(med_d);
+                                    style = map(unit_d.idx) do i          # ukryty dla cm⁻¹ i eV (nie zależą od ośrodka)
+                                        k = UNIT_KEYS[clamp(i, 1, length(UNIT_KEYS))]
                                         unit_is_energy(k) ? "display:none;" : "display:inline-flex;align-items:center;gap:6px;"
                                     end)),
-                row(Bonito.DOM.b("Natężenia"); mb = 4),
-                row(lab("Źródło:", src_dd),
-                    lab("Saha, lg n_e [cm⁻³]:", saha_cb, ne_sl, val(ne_sl.value)),
-                    lab("Skala:", scale_dd),
-                    lab("Odniesienie:", ref_dd)),
-                row(Bonito.DOM.b("Zlewanie linii"); mb = 4),
-                row(lab("Próg [dekady]:", thr_sl, val(thr_sl.value)),
-                    lab("Rozdzielczość [nm]:", res_sl, val(res_sl.value)),
-                    lab("lub zależna od zoomu [px]:", rescb, px_sl, val(px_sl.value))),
-                row(Bonito.DOM.b("Wygląd"); mb = 4),
-                row(lab("czarno-białe", bw_cb),
-                    lab("składowe zlanych linii w opisie", members_cb); mb = 0);
+                row(Bonito.DOM.b(tr("g_int")); mb = 4),
+                row(lab("source", ddv(src_d)),
+                    Bonito.DOM.span(Bonito.DOM.span("Saha, lg n_e [cm⁻³]:"), saha_cb, ne_sl, val(ne_sl.value);
+                                    style = "display:inline-flex;align-items:center;gap:6px;"),
+                    lab("scale", ddv(scale_d)),
+                    lab("reference", ddv(ref_d))),
+                row(Bonito.DOM.b(tr("g_merge")); mb = 4),
+                row(lab("threshold", thr_sl, val(thr_sl.value)),
+                    lab("resol", res_sl, val(res_sl.value)),
+                    lab("resolpx", rescb, px_sl, val(px_sl.value))),
+                row(Bonito.DOM.b(tr("g_look")); mb = 4),
+                row(lab("bw", bw_cb),
+                    lab("members", members_cb); mb = 0);
                 style = "position:absolute;left:12px;z-index:20;margin-top:4px;padding:10px 14px;" *
                         "background:#1e1e24;border:1px solid #666;border-radius:6px;box-sizing:border-box;" *
                         "width:max-content;max-width:calc(100vw - 24px);max-height:70vh;overflow:auto;" *
@@ -703,24 +828,26 @@ function build_app()
         return Bonito.DOM.div(
             css,
             row(Bonito.DOM.b("Spektruś.jl"; style = "font-size:1.2em;margin-right:6px;"),
-                lab("Pierwiastek:", name_dd),
-                lab("Symbol:", sym_dd),
-                lab("Z:", z_in),
-                grp(Bonito.DOM.span("Zakres:"), btns...),
-                grp(Bonito.DOM.span("Widok:"), b_left, b_right, b_zin, b_zout),
-                lab("Jednostki:", unit_dd)),
-            row(grp(Bonito.DOM.span("Linie:"),
-                    ion("I", ion1_cb, "atom niezjonizowany (X)"),
-                    muted("niezjonizowane"),
+                lab("element", ddv(name_d)),
+                lab("symbol", sym_dd),
+                Bonito.DOM.span(Bonito.DOM.span("Z:"), z_in; style = "display:inline-flex;align-items:center;gap:6px;"),
+                grp(lbl("range"), range_nodes...),
+                grp(lbl("view"), b_left, b_right, b_zin, b_zout),
+                lab("units", ddv(unit_d))),
+            row(grp(lbl("lines"),
+                    ion("I", ion1_cb, "tip1"),
+                    muted("neutral"),
                     muted("│"),
-                    muted("zjonizowane:"),
-                    ion("II", ion2_cb, "jednokrotnie zjonizowane (X⁺)"),
-                    ion("III", ion3_cb, "dwukrotnie zjonizowane (X²⁺)"),
-                    ion("IV", ion4_cb, "trzykrotnie zjonizowane (X³⁺)"),
-                    ion("V", ion5_cb, "czterokrotnie zjonizowane (X⁴⁺)")),
-                lab("T [K]:", T_sl, val(T_sl.value)),
+                    muted("ionized"),
+                    ion("II", ion2_cb, "tip2"),
+                    ion("III", ion3_cb, "tip3"),
+                    ion("IV", ion4_cb, "tip4"),
+                    ion("V", ion5_cb, "tip5")),
+                Bonito.DOM.span(Bonito.DOM.span("T [K]:"), T_sl, val(T_sl.value);
+                                style = "display:inline-flex;align-items:center;gap:6px;"),
                 more,
-                about_btn),
+                pair(about_a, about_b; w = length("ⓘ O programie") + 3),
+                Bonito.DOM.span(lang_btn; title = tr("langtip"))),
             Bonito.DOM.div(Bonito.DOM.div(about_panel; style = "position:absolute;z-index:30;left:12px;right:12px;");
                            style = "position:relative;height:0;"),
             Bonito.DOM.div(fig; style = "flex:1 1 auto;min-height:0;position:relative;overflow:hidden;"),
