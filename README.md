@@ -37,6 +37,13 @@ Pobieranie i `prepare_lines.jl` wystarczy powtórzyć tylko wtedy, gdy zmienia s
 - wypisywanie czasów przerysowania w konsoli: `TIMING = true` (domyślnie wyłączone).
 - język interfejsu na starcie: `LANG_DEFAULT` (`"pl"` albo `"en"`); w aplikacji przełącza go przycisk PL | EN,
 - imię i nazwisko autora w oknie „O programie”: `AUTHOR`.
+- zapis wykresu: przycisk 💾 PNG pobiera obraz wykresu z przeglądarki (plik `spektrus_<symbol>_<jednostka>.png`).
+
+## Repozytorium
+
+https://github.com/falcotinnunculus/spektrus.jl
+
+Autorzy tej wersji: Mateusz Winiarski i Claude (Anthropic).
 
 ## Jednostki osi
 

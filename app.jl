@@ -46,7 +46,8 @@ const X_MIN_WIDTH = 0.002     # najwęższe okno [nm] w skali liniowej (w logary
 const RES_FLOOR   = 1e-4      # najmniejsza rozdzielczość zlewania linii [nm] (linie bliższe niż to uznajemy za tę samą)
 
 # autor tej wersji (wyświetlany w oknie "O programie" obok Claude'a) - wpisz swoje imię i nazwisko
-const AUTHOR = "WPISZ IMIĘ I NAZWISKO"
+const AUTHOR = "Mateusz Winiarski"
+const REPO_URL = "https://github.com/falcotinnunculus/spektrus.jl"
 
 const DF       = load_data()
 const ELEMENTS = element_list(DF)
@@ -56,6 +57,9 @@ const SYM_OPTS  = collect(String, ELEMENTS.symbol)
 # zakresy: (napis PL, napis EN, (od, do) [nm])
 const RANGES   = [("UV", "UV", (100.0, 380.0)), ("widzialne", "visible", (380.0, 780.0)),
                   ("IR", "IR", (780.0, 2500.0)), ("wszystko", "all", (100.0, 2500.0))]
+
+# kompilacja JIT dzieje się raz na proces Julii, więc przycisk "Rozgrzej" znika dla wszystkich nowych stron po pierwszym użyciu
+const WARMED = Ref(false)
 
 # język interfejsu na starcie: "pl" albo "en" (przełącza się przyciskiem PL/EN)
 const LANG_DEFAULT = "pl"
@@ -169,6 +173,12 @@ const TR = Dict(
     "tip4"      => ("trzykrotnie zjonizowane (X³⁺)", "triply ionized (X³⁺)"),
     "tip5"      => ("czterokrotnie zjonizowane (X⁴⁺)", "quadruply ionized (X⁴⁺)"),
     "langtip"   => ("Język interfejsu: PL / EN", "Interface language: PL / EN"),
+    "pngtip"    => ("Zapisz wykres jako obraz PNG", "Save the plot as a PNG image"),
+    "warming"   => ("⏳ Rozgrzewanie…", "⏳ Warming up…"),
+    "warmtip"   => ("Pierwsze użycie każdej funkcji kompiluje kod, co powoduje chwilowe lagi. Przycisk wykonuje przykładowe operacje " *
+                    "(przesunięcia, powiększenia, skala, jednostki, inny pierwiastek), potem przywraca ustawienia i znika.",
+                    "The first use of each function compiles code, which causes brief lags. The button runs sample operations " *
+                    "(panning, zooming, scale, units, another element), then restores your settings and disappears."),
 )
 
 # Para list rozwijanych PL/EN o wspólnym indeksie (źródłem prawdy jest `idx`). Zmiana napisów na liście w
@@ -245,6 +255,10 @@ function build_app()
         about_a  = Bonito.Button("ⓘ O programie")
         about_b  = Bonito.Button("ⓘ About")
         lang_btn = Bonito.Button("PL | EN")
+        png_btn  = Bonito.Button("💾 PNG")
+        warm_a   = Bonito.Button("🔥 Rozgrzej")
+        warm_b   = Bonito.Button("🔥 Warm up")
+        warm_state = Observable(WARMED[] ? "done" : "idle")        # "idle" -> "running" -> "done"
         about_open = Observable(false)
 
         info  = Observable("")
@@ -307,6 +321,14 @@ function build_app()
             vals = nice_ticks(min(ua, ub), max(ua, ub), log_x[])
             vals === Makie.automatic && return vals
             return log_x[] ? log10.(vals) : vals
+        end
+
+        last_ticks = Ref{Any}(nothing)
+        function set_ticks!(t)                       # nie przebudowuj tick-ów, gdy się nie zmieniły
+            t == last_ticks[] && return nothing
+            last_ticks[] = t
+            ax.xticks = t
+            return nothing
         end
 
         # przerysowanie po zakończeniu zoomu/przesuwania (czekamy 0,2 s na brak kolejnych zmian)
@@ -478,7 +500,7 @@ function build_app()
                 ax.ylabel[] == ylabel_txt || (ax.ylabel = ylabel_txt)
                 xa, xb = view_to_X((x0, x1))
                 xlims!(ax, xa, xb)
-                ax.xticks = ticks_for(x0, x1)
+                set_ticks!(ticks_for(x0, x1))
                 ylims!(ax, 0, 1.05)
                 ylims!(ax_strip, 0, 1)
                 lap("limity i ticki")
@@ -597,6 +619,8 @@ function build_app()
                 Bonito.DOM.h3("Spektruś.jl"; style = "margin:0 0 6px 0;"),
                 Bonito.DOM.p(Bonito.DOM.b(L("Autorzy tej wersji: ", "Authors of this version: ")), AUTHOR,
                              L(" oraz Claude (Anthropic).", " and Claude (Anthropic).")),
+                Bonito.DOM.p(L("Kod źródłowy: ", "Source code: "),
+                             Bonito.DOM.a(REPO_URL; href = REPO_URL, target = "_blank", style = "color:#8cf;")),
                 Bonito.DOM.p(L("Odtworzenie programu Spektruś 1.0 (Mikołaj Pytel, 2002) w Julii. " *
                                "Pokazuje widma emisyjne pierwiastków 1–99 w UV, świetle widzialnym i podczerwieni.",
                                "A recreation of the program Spektruś 1.0 (Mikołaj Pytel, 2002) in Julia. " *
@@ -685,7 +709,7 @@ function build_app()
                 end
             end
             view_x[] = (clo, chi)
-            ax.xticks = ticks_for(clo, chi)
+            set_ticks!(ticks_for(clo, chi))
             (ref_d.idx[] == 2 || rescb.value[]) && schedule_redraw!()
         end
 
@@ -761,6 +785,96 @@ function build_app()
             xa, xb = view_to_X(view_x[])
             sel[] = (drag_x0[], clamp(mouse_X(), xa, xb))
             sel_vis[] || (sel_vis[] = true)
+        end
+
+        # "Rozgrzej": wykonuje w podłączonej przeglądarce przykładowe operacje (przesuwanie, zoom, skala, jednostki,
+        # jony, inny pierwiastek), żeby skompilować ścieżki kodu, a potem przywraca ustawienia. Działa raz na proces Julii.
+        function warm_up!()
+            warm_state[] == "idle" || return nothing
+            warm_state[] = "running"
+            saved = (view = view_x[], Z = Zsel[], xs = xs_d.idx[], unit = unit_d.idx[], ion2 = ion2_cb.value[])
+            step(f) = try
+                f()
+            catch e
+                @warn "Rozgrzewanie: krok nie powiódł się" exception = (e, catch_backtrace())
+            end
+            try
+                # przesunięcia ◀ ▶ oraz powiększenia i pomniejszenia ＋ －
+                for (fac, sh) in ((1.0, 0.25), (1.0, 0.25), (1.0, -0.25), (0.5, 0.0), (0.5, 0.0), (2.0, 0.0), (2.0, 0.0), (1.0, -0.25))
+                    step(() -> move_view!(fac, sh))
+                end
+                # zaznaczenie obszaru lewym przyciskiem = ustawienie limitów osi (obsługuje je ax.finallimits)
+                for frac in (0.3, 0.3)
+                    step() do
+                        xa, xb = view_to_X(view_x[])
+                        w = xb - xa
+                        xlims!(ax, xa + frac * w, xb - frac * w)
+                        request_redraw!()
+                    end
+                end
+                # skala logarytmiczna, inne jednostki, drugi stopień jonizacji
+                step(() -> (xs_d.idx[] = 2))
+                step(() -> (xs_d.idx[] = saved.xs))
+                step(() -> (unit_d.idx[] = 4))
+                step(() -> (unit_d.idx[] = 5))
+                step(() -> (unit_d.idx[] = saved.unit))
+                step(() -> (ion2_cb.value[] = true))
+                step(() -> (ion2_cb.value[] = saved.ion2))
+                # bogaty pierwiastek (dużo linii: większa pojemność wykresu), potem powrót
+                if 26 in ELEMENTS.Z
+                    step(() -> set_element!(26))
+                    step(() -> set_element!(saved.Z))
+                end
+            finally
+                view_x[] = saved.view
+                step(request_redraw!)
+                WARMED[] = true
+                warm_state[] = "done"
+            end
+            return nothing
+        end
+        for b in (warm_a, warm_b)
+            on(b.value) do _
+                @async warm_up!()
+            end
+        end
+
+        # zapis wykresu jako PNG: pobieramy obraz z canvasu WebGL w przeglądarce. WebGL czyści bufor rysowania po
+        # wyświetleniu klatki, więc na chwilę podpinamy się pod requestAnimationFrame i robimy zrzut tuż po tym,
+        # jak WGLMakie narysuje klatkę (pusty zrzut rozpoznajemy po rozmiarze i próbujemy w następnej klatce).
+        file_unit = Dict("nm" => "nm", "Å" => "A", "µm" => "um", "cm⁻¹" => "cm-1", "eV" => "eV")
+        on(png_btn.value) do _
+            sym = string(ELEMENTS.symbol[something(findfirst(==(Zsel[]), ELEMENTS.Z), 1)])
+            fname = "spektrus_$(sym)_$(get(file_unit, unit_x[], "nm")).png"
+            Bonito.evaljs(session, Bonito.js"""
+                (function () {
+                    const canvas = document.querySelector('.sp-fig canvas');
+                    if (!canvas) { console.warn('PNG: nie znaleziono wykresu'); return; }
+                    const blank = document.createElement('canvas');
+                    blank.width = canvas.width; blank.height = canvas.height;
+                    const blankLen = blank.toDataURL('image/png').length;
+                    const raf = window.requestAnimationFrame;
+                    let frames = 0, done = false;
+                    function restore() { done = true; window.requestAnimationFrame = raf; }
+                    function save(url) {
+                        restore();
+                        const a = document.createElement('a');
+                        a.href = url; a.download = $(fname);
+                        document.body.appendChild(a); a.click(); a.remove();
+                    }
+                    window.requestAnimationFrame = function (cb) {
+                        return raf.call(window, function (t) {
+                            cb(t);
+                            if (done) { return; }
+                            frames += 1;
+                            const url = canvas.toDataURL('image/png');
+                            if (url.length > 1.3 * blankLen) { save(url); }
+                            else if (frames > 90) { restore(); console.warn('PNG: pusty bufor WebGL, zrzut się nie udał'); }
+                        });
+                    };
+                    setTimeout(function () { if (!done) { restore(); console.warn('PNG: przekroczono czas oczekiwania'); } }, 5000);
+                })();
+            """)
         end
 
         # zmiana języka: odśwież napisy generowane w Julii (opis linii, pasek informacji, etykiety osi)
@@ -847,10 +961,15 @@ function build_app()
                                 style = "display:inline-flex;align-items:center;gap:6px;"),
                 more,
                 pair(about_a, about_b; w = length("ⓘ O programie") + 3),
-                Bonito.DOM.span(lang_btn; title = tr("langtip"))),
+                Bonito.DOM.span(lang_btn; title = tr("langtip")),
+                Bonito.DOM.span(png_btn; title = tr("pngtip")),
+                Bonito.DOM.span(pair(warm_a, warm_b; w = length("🔥 Rozgrzej") + 3); title = tr("warmtip"),
+                                style = map(st -> st == "idle" ? "display:inline-block;" : "display:none;", warm_state)),
+                Bonito.DOM.span(lbl("warming");
+                                style = map(st -> st == "running" ? "display:inline-block;color:#fc8;" : "display:none;", warm_state))),
             Bonito.DOM.div(Bonito.DOM.div(about_panel; style = "position:absolute;z-index:30;left:12px;right:12px;");
                            style = "position:relative;height:0;"),
-            Bonito.DOM.div(fig; style = "flex:1 1 auto;min-height:0;position:relative;overflow:hidden;"),
+            Bonito.DOM.div(fig; class = "sp-fig", style = "flex:1 1 auto;min-height:0;position:relative;overflow:hidden;"),
             Bonito.DOM.div(info; style = "margin-top:4px;color:#9aa;font-size:0.85em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"),
             Bonito.DOM.div(
                 Bonito.DOM.div(summary; style = "min-height:1.3em;"),
