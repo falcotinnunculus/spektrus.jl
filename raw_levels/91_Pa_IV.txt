@@ -1,0 +1,3 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Reference
+"5f2.6p6"	"3H"	"4"	9	""	"0"	""	"0"	"L13741"
+"Pa V (5f.6p6 2F*<5/2>)"	"Limit"	"---"		"["	"249000"	"]"	"3000"	"L13741c99"

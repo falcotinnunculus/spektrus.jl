@@ -1,0 +1,3 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Reference
+"4f6.5s2.5p6"	"7F"	"0"	1	""	"0"	""	"0"	"L4095"
+"Gd VI (4f6.5s2.5p5*)"	"Limit"	"---"		"["	"522300"	"]"	"3200"	"L4095"

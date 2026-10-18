@@ -1,0 +1,3 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Reference
+"4d3"	"4F"	"3/2"	4	""	"0"	""	"0"	"L8672"
+"Tc VI (4d2 3F<2>)"	"Limit"	"---"		"("	"460000"	")"	"15000"	"L8672c99"

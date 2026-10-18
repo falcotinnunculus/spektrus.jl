@@ -1,0 +1,3 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Reference
+"4f10.5p6"	"5I"	"8"	17	""	"0"	""	"0"	"L11605"
+"Dy IV (4f9.5p6 6H*<15/2>)"	"Limit"	"---"		"["	"184620"	"]"	"240"	"L19883c180"

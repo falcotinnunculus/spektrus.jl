@@ -1,0 +1,3 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Reference
+"5f6.7s2"	"7F"	"0"	1	""	"0"	""	"0"	"L15992,L11260"
+"Pu II (5f6.7s 8F<1/2>)"	"Limit"	"---"		""	"48601"	""	"2"	"L15992,L11260"

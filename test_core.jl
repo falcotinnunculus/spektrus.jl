@@ -15,6 +15,9 @@ sumI(lines, λ0; win = 0.5) = sum(lines.I[abs.(lines.λ .- λ0) .<= win]; init =
 df = load_data()
 println("Wczytano $(nrow(df)) linii\n")
 
+# testy poniżej (poza sekcją o levels.csv) liczymy na poziomach z linii, niezależnie od tego, czy levels.csv istnieje
+Spektrus.LEVEL_DB[] = false
+
 check("vac2air: H-α próżnia 656.4696 → powietrze 656.288", abs(vac2air(656.4696) - 656.2883) < 0.001)
 check("vac2air: poniżej 200 nm bez zmian", vac2air(150.0) == 150.0)
 
@@ -58,6 +61,13 @@ empty_els = [r.Z for r in eachrow(els) if nrow(prepare_lines(df, r.Z; source = "
 check("Każdy z $(nrow(els)) pierwiastków ma linie do narysowania (LTE lub NIST)", isempty(empty_els))
 isempty(empty_els) || println("   puste: ", empty_els)
 
+# --- stopień bez Aki w trybie LTE ---
+let r = prepare_lines(df, 57; ions = [1, 3], source = "lte")
+    check("La I+III w LTE: stopień III pominięty (brak Aki) i zgłoszony w `skipped`",
+          r.use_lte && haskey(r.skipped, 3) && !any(==(3), r.lines.ion) && any(==(1), r.lines.ion))
+    check("Na I w LTE: nic nie jest zgłoszone jako całkowicie pominięte", isempty(prepare_lines(df, 11; ions = [1], source = "lte").skipped))
+end
+
 # --- równowaga Saha ---
 # wartości odniesienia policzone niezależnie w Pythonie (SAHA_C z CODATA = 4.8294e15)
 fH = saha_fractions([2.0, 1.0], [109678.77], 10000.0, 1e14)
@@ -100,6 +110,42 @@ let i = findfirst(==(top.λ), na.lines.λ)
           occursin("zlane linie", describe_line(na.lines, i; n = 2)) && occursin("merged lines", describe_line(na.lines, i; n = 2, lang = "en")))
     check("opis linii: tryb energii, EN = vacuum, PL = próżnia",
           occursin("próżnia", describe_line(na.lines, i; unit = "eV")) && occursin("vacuum", describe_line(na.lines, i; unit = "eV", lang = "en")))
+end
+
+# --- pełne listy poziomów (levels.csv) ---
+let tmp = tempname() * ".csv"
+    write(tmp, "Z,ion,E_cm1,g\n11,1,0.0,2\n11,1,16956.17,2\n11,1,16973.37,4\n11,1,60000.0,2\n")   # ostatni leży powyżej chi
+    db = load_levels(tmp)
+    check("levels.csv: wczytanie (Na I, 4 poziomy)", db !== nothing && length(db[(11, 1)]) == 4)
+    base = level_table(df, 11, 1, 41449.45)                    # tryb poziomów z linii (LEVEL_DB = false)
+    Spektrus.LEVEL_DB[] = db
+    lv = level_table(df, 11, 1, 41449.45)                      # cache rozróżnia bazy poziomów, więc to nowy wynik
+    check("level_table: poziom podstawowy z NIST (g = 2), bez sztucznego (0.0, 1)", (0.0, 2) in lv && !((0.0, 1) in lv))
+    check("level_table: poziomy powyżej energii jonizacji odcięte", all(p -> p[1] < 41449.45, lv))
+    check("level_table: poziom z NIST nie jest liczony dwa razy (zgodny z poziomem z linii)",
+          count(p -> abs(p[1] - 16973.37) < 0.01, lv) == 1)
+    check("level_table: NIST + poziomy z linii (nie mniej niż same linie)", length(lv) >= length(base) - 1 && length(lv) > 3)
+    Spektrus.LEVEL_DB[] = false
+    check("bez levels.csv: powrót do poziomów z linii", level_table(df, 11, 1, 41449.45) == base)
+    rm(tmp)
+end
+
+# --- tabela linii i adres strony ---
+let r = prepare_lines(df, 11; ions = [1], source = "lte")
+    Iref = reference_intensity(r.lines, 380.0, 780.0)
+    n = size(r.lines, 1)
+    tb = line_table(r.lines, 1:n, Iref, "nm")
+    check("line_table: wiersz na każdą linię, od najsilniejszej", size(tb, 1) == n && issorted(tb.intensity_percent; rev = true))
+    d2 = tb[abs.(tb.wavelength_nm .- 588.995) .< 0.01, :]
+    check("line_table: D2 ma ok. 100% (linia odniesienia) i poziom dolny 3s",
+          !isempty(d2) && maximum(d2.intensity_percent) ≈ 100 && occursin("3s", d2.lower_level[1]))
+    te = line_table(r.lines, 1:n, Iref, "eV")
+    check("line_table: w eV wartość = hc/λ(próżnia)", all(abs.(te.axis_value .- 1239.841984 ./ te.wavelength_vac_nm) .< 1e-9))
+end
+let q = parse_query("/?z=26&x=380,780&lang=en&ions=1%2C3")
+    check("parse_query: klucze i wartości", q["z"] == "26" && q["x"] == "380,780" && q["lang"] == "en" && q["ions"] == "1,3")
+    check("parse_query: brak zapytania daje pusty słownik", isempty(parse_query("/")) && isempty(parse_query("/?")))
+    check("snap: wartość z adresu trafia w krok suwaka", snap(1000:100:20000, 6049) == 6000 && snap(0.5:0.1:6.0, 4.04) ≈ 4.0)
 end
 
 # --- opis linii ---

@@ -9,9 +9,9 @@ using CSV, DataFrames
 
 export load_data, element_list, vac2air, wl2rgb, cluster_ids, prepare_lines,
        cluster_window, reference_intensity, visible_mask, line_height, describe_line,
-       load_ionization, ionization_table, level_table, partition_function,
+       load_ionization, ionization_table, level_table, load_levels, level_db, partition_function,
        saha_fractions, ionization_balance, describe_members,
-       unit_value, unit_to_nm, unit_text, unit_is_energy, element_name
+       unit_value, unit_to_nm, unit_text, unit_is_energy, element_name, line_table, parse_query, snap, pick_language
 
 const C2  = 1.438777            # hc/k [cm·K]
 const VIS = (380.0, 780.0)      # zakres widzialny [nm]
@@ -123,7 +123,33 @@ element_list(df) = sort(combine(groupby(df, [:Z, :symbol]), nrow => :n), :Z)
 # ---------------- równowaga jonizacji (Saha) ----------------
 
 const IONIZATION = Ref{Any}(nothing)     # (Z, stopień) => energia jonizacji [cm⁻¹]
-const LEVELS = Dict{Tuple{UInt,Int,Int},Vector{Tuple{Float64,Int}}}()
+const LEVELS = Dict{Tuple{UInt,UInt,Int,Int},Vector{Tuple{Float64,Int}}}()    # (df, baza poziomów, Z, stopień)
+# pełne listy poziomów z NIST (levels.csv): nothing = jeszcze nie wczytano, false = brak pliku, Dict = dane
+const LEVEL_DB = Ref{Any}(nothing)
+
+"""
+Wczytuje levels.csv (kolumny Z, ion, E_cm1, g; wynik fetch_nist_levels.jl): pełne listy poziomów energetycznych
+stopni jonizacji. Zwraca słownik (Z, ion) => posortowany wektor (E [cm⁻¹], g) albo `nothing`, gdy pliku nie ma.
+"""
+function load_levels(path = joinpath(@__DIR__, "levels.csv"))
+    isfile(path) || return nothing
+    t = CSV.read(path, DataFrame)
+    d = Dict{Tuple{Int,Int},Vector{Tuple{Float64,Int}}}()
+    for r in eachrow(t)
+        (ismissing(r.E_cm1) || ismissing(r.g)) && continue
+        push!(get!(d, (Int(r.Z), Int(r.ion)), Tuple{Float64,Int}[]), (Float64(r.E_cm1), Int(r.g)))
+    end
+    for v in values(d)
+        sort!(v)
+    end
+    return d
+end
+
+"Pełne listy poziomów (wczytane raz z levels.csv) albo `nothing`, gdy pliku nie ma."
+function level_db()
+    LEVEL_DB[] === nothing && (LEVEL_DB[] = something(load_levels(), false))
+    return LEVEL_DB[] === false ? nothing : LEVEL_DB[]
+end
 
 """
 Wczytuje ionization_energies.csv (kolumny Z, stage, chi_cm1): energia jonizacji stopnia `stage`
@@ -141,21 +167,33 @@ function ionization_table()
 end
 
 """
-Poziomy (E [cm⁻¹], g) stopnia `z` pierwiastka `Z`, zebrane z dolnych i górnych poziomów pobranych linii
-(tylko poziomy poniżej energii jonizacji `chi_cm1`). Poziom podstawowy bywa poza zakresem pobranych linii
-(np. rezonansowe poniżej 100 nm), więc gdy go brak, dokładamy (0, g = 1): przybliżenie dobre dla
-atomów i jonów o zamkniętych powłokach, dla pozostałych może się mylić o mały czynnik.
+Poziomy (E [cm⁻¹], g) stopnia `z` pierwiastka `Z`, poniżej energii jonizacji `chi_cm1`.
+Źródła: (1) pełne listy poziomów NIST z levels.csv (jeśli plik jest), (2) poziomy zebrane z dolnych i górnych
+poziomów pobranych linii. Gdy oba źródła mają ten sam poziom (energia równa do 0.01 cm⁻¹), wygrywa NIST.
+Suma obu źródeł jest potrzebna, bo dla części jonów NIST podaje tylko poziom podstawowy, a linie znają więcej.
+Poziom podstawowy bywa poza zakresem pobranych linii (np. rezonansowe poniżej 100 nm), więc gdy go brak w obu
+źródłach, dokładamy (0, g = 1): przybliżenie dobre dla atomów i jonów o zamkniętych powłokach, dla pozostałych
+może się mylić o mały czynnik.
 """
 function level_table(df, Z, z, chi_cm1 = Inf)
-    key = (objectid(df), Z, z)
+    db = level_db()
+    key = (objectid(df), db === nothing ? UInt(0) : objectid(db), Z, z)
     return get!(LEVELS, key) do
-        sub = df[(df.Z .== Z) .& (df.ion .== z), :]
+        r2(E) = round(Float64(E); digits = 2)
         seen = Set{Tuple{Float64,Int}}()
+        known = Set{Float64}()                       # energie poziomów z NIST (mają pierwszeństwo)
+        if db !== nothing && haskey(db, (Z, z))
+            for (E, g) in db[(Z, z)]
+                push!(seen, (r2(E), Int(g)))
+                push!(known, r2(E))
+            end
+        end
+        sub = df[(df.Z .== Z) .& (df.ion .== z), :]
         for (E, g) in zip(sub.Ei_cm1, sub.gi)
-            (ismissing(E) || ismissing(g)) || push!(seen, (Float64(E), Int(g)))
+            (ismissing(E) || ismissing(g) || r2(E) in known) || push!(seen, (r2(E), Int(g)))
         end
         for (E, g) in zip(sub.Ek_cm1, sub.gk)
-            (ismissing(E) || ismissing(g)) || push!(seen, (Float64(E), Int(g)))
+            (ismissing(E) || ismissing(g) || r2(E) in known) || push!(seen, (r2(E), Int(g)))
         end
         if isempty(seen)
             Tuple{Float64,Int}[]
@@ -224,6 +262,10 @@ oraz funkcję podziału, I = (N_z/N)·g_k·A_ki·ν·exp(−E_k/kT)/U_z, dla gę
 Dzięki temu jasności linii różnych stopni jonizacji są ze sobą porównywalne. Udziały wracają w
 `fractions` (wektor dla stopni I..K albo `nothing`, gdy Saha się nie zastosowała).
 
+W trybie LTE linie bez Aki (lub bez Ek/gk) nie mają jak dostać natężenia i są pomijane. Gdy wszystkie linie
+wybranego stopnia są takie (np. La III), stopień ten znika z widma, mimo że ma linie w danych. Wynik zawiera
+`skipped`: słownik stopień => liczba linii, tylko dla takich całkowicie pominiętych stopni (inaczej pusty).
+
 Stopnie jonizacji: `ions` (np. [1], [2], [1, 2]) wybiera dokładnie te stopnie; bez `ions`
 działa dawne `ion2` (false: tylko I, true: I i II). Pusty wybór daje pusty wynik.
 """
@@ -234,10 +276,15 @@ function prepare_lines(df, Z; ion2 = false, ions = nothing, medium = "air", sour
     sub.λ = medium == "air" ? vac2air.(sub.wl_vac_nm) : copy(sub.wl_vac_nm)
     use_lte = false
     fractions = nothing
+    skipped = Dict{Int,Int}()
     if source == "lte" && :Aki_s in propertynames(sub)
         lte = dropmissing(sub, [:Aki_s, :Ek_cm1, :gk])
         if nrow(lte) > 0
             use_lte = true
+            for z in stages                                   # stopnie, w których żadna linia nie ma danych do LTE
+                tot = count(==(z), sub.ion)
+                (tot > 0 && count(==(z), lte.ion) == 0) && (skipped[z] = tot)
+            end
             sub = lte
             bal = saha ? ionization_balance(df, Z, T, ne) : nothing
             if bal === nothing
@@ -257,7 +304,7 @@ function prepare_lines(df, Z; ion2 = false, ions = nothing, medium = "air", sour
     end
     sub = sub[sub.I .> 0, :]
     sub = sub[sortperm(sub.λ), :]
-    return (; lines = sub, use_lte, fractions)
+    return (; lines = sub, use_lte, fractions, skipped)
 end
 
 """
@@ -342,6 +389,67 @@ Składowe zlanego klastra (wiersze `first:last` w `lines`), od najsilniejszej, p
 poziomy, Aki i udział w natężeniu klastra (długość fali tylko wtedy, gdy składowe się różnią).
 Pokazuje najwyżej `max` pozycji.
 """
+const STAGES = ("I", "II", "III", "IV", "V")
+
+"""
+Tabela pojedynczych linii do podglądu i eksportu (CSV): wiersze `rows` tabeli `lines` (wynik `prepare_lines`),
+od najsilniejszej. Kolumny: pierwiastek, stopień, λ [nm] w ośrodku użytym w `lines`, λ w próżni, wartość w jednostce
+osi `unit` (dla cm⁻¹ i eV liczona z długości fali w próżni), natężenie względne [%] wobec `Iref`, poziomy
+dolny i górny (konfiguracja, term, J), Aki, energie Ei i Ek [cm⁻¹], wagi gi i gk.
+"""
+function line_table(lines, rows, Iref, unit = "nm")
+    r = lines[rows[sortperm(lines.I[rows]; rev = true)], :]
+    level(c, t, j) = [join(fmt.([a, b, d]), " ") for (a, b, d) in zip(c, t, j)]
+    vals = unit_is_energy(unit) ? unit_value.(r.wl_vac_nm, unit) : unit_value.(r.λ, unit)
+    return DataFrame(
+        element = String.(r.symbol),
+        stage = [STAGES[clamp(i, 1, length(STAGES))] for i in r.ion],
+        wavelength_nm = r.λ,
+        wavelength_vac_nm = r.wl_vac_nm,
+        axis_value = vals,
+        axis_unit = fill(unit, size(r, 1)),
+        intensity_percent = 100 .* r.I ./ Iref,
+        lower_level = level(r.conf_i, r.term_i, r.J_i),
+        upper_level = level(r.conf_k, r.term_k, r.J_k),
+        Aki_s = r.Aki_s, Ei_cm1 = r.Ei_cm1, Ek_cm1 = r.Ek_cm1, gi = r.gi, gk = r.gk)
+end
+
+"Rozbiera adres żądania (`/?z=26&x=380,780`) na słownik tekstów; bez zapytania zwraca pusty słownik."
+function parse_query(target::AbstractString)
+    d = Dict{String,String}()
+    i = findfirst('?', target)
+    i === nothing && return d
+    for kv in split(target[nextind(target, i):end], '&'; keepempty = false)
+        p = split(kv, '='; limit = 2)
+        length(p) == 2 && !isempty(p[1]) && (d[String(p[1])] = replace(String(p[2]), "%2C" => ",", "%2c" => ","))
+    end
+    return d
+end
+
+"""
+Wybiera język interfejsu z nagłówka `Accept-Language` przeglądarki (np. "pl-PL,pl;q=0.9,en-US;q=0.8"): spośród
+obsługiwanych języków `supported` bierze ten o najwyższej wadze q (przy remisie pierwszy z listy), a gdy żaden
+nie jest obsługiwany albo nagłówka nie ma, zwraca `default`.
+"""
+function pick_language(accept::AbstractString; supported = ("pl", "en"), default = "en")
+    best = default
+    bestq = -1.0
+    for part in split(accept, ','; keepempty = false)
+        fields = split(strip(part), ';')
+        lang = first(split(lowercase(strip(fields[1])), '-'))
+        q = 1.0
+        for f in fields[2:end]
+            m = match(r"^\s*q\s*=\s*([0-9.]+)\s*$", f)
+            m === nothing || (q = something(tryparse(Float64, m.captures[1]), 0.0))
+        end
+        (q > 0 && lang in supported && q > bestq) && ((best, bestq) = (lang, q))
+    end
+    return best
+end
+
+"Element zakresu `r` najbliższy wartości `v` (żeby wartość z adresu zawsze pasowała do kroku suwaka)."
+snap(r, v) = (c = collect(r); c[argmin(abs.(c .- v))])
+
 function describe_members(lines, first, last; max = 6, lang = "pl")
     rows = first:last
     total = sum(lines.I[rows])

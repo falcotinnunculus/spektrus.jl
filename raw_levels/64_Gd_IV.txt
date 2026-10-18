@@ -1,0 +1,6 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Leading percentages	Reference
+"4f7"	"8S*"	"7/2"	8	""	"0"	""	"0"	"  97         :     3   6P*  "	"L3974"
+"4f7"	"6P*"	"7/2"	8	"["	"32120"	"]"	""	"  75         :    13   6D*  "	""
+"4f7"	"6P*"	"5/2"	6	"["	"32720"	"]"	""	"  82         :    14   6D*  "	""
+"4f7"	"6P*"	"3/2"	4	"["	"33290"	"]"	""	"  90         :     8   6D*  "	""
+"Gd V (4f6.5s2.5p6 7F<0>)"	"Limit"	"---"		"["	"358400"	"]"	"650"	"                            "	"L19883c180"

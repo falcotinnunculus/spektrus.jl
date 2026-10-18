@@ -1,0 +1,3 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Reference
+"6p6"	"1S"	"0"	1	""	"0"	""	"0"	"L8672"
+"Ra IV (6p5 2P*<3/2>)"	"Limit"	"---"		"("	"250000"	")"	"13000"	"L8672c99"

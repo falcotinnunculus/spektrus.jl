@@ -16,6 +16,8 @@ using Bonito, WGLMakie
 include(joinpath(@__DIR__, "Spektrus.jl"))
 using .Spektrus
 using Logging
+import CSV
+import Base64
 
 # Zwykłe kliknięcie na wykresie (bez przeciągania) daje zaznaczenie o zerowej szerokości; Makie ignoruje je
 # i wypisuje ostrzeżenie "Rectangle zoom ignored". Jest nieszkodliwe, więc filtrujemy tylko tę jedną wiadomość.
@@ -43,6 +45,8 @@ const X_MIN       = 0.0       # dolna granica [nm], skala liniowa
 const X_MIN_LOG   = 10.0      # dolna granica [nm], skala logarytmiczna (log(0) nie istnieje)
 const X_MAX       = 3000.0    # górna granica [nm]; dane NIST sięgają 2500 nm
 const X_MIN_WIDTH = 0.002     # najwęższe okno [nm] w skali liniowej (w logarytmicznej: 0,002 dekady)
+const TABLE_ROWS   = 200      # ile najsilniejszych linii pokazuje tabela (CSV zawiera wszystkie linie w widoku)
+const LOAD_TIMING = false     # true: konsola pokazuje czasy kolejnych etapów budowania strony przy każdym wczytaniu
 const RES_FLOOR   = 1e-4      # najmniejsza rozdzielczość zlewania linii [nm] (linie bliższe niż to uznajemy za tę samą)
 
 # autor tej wersji (wyświetlany w oknie "O programie" obok Claude'a) - wpisz swoje imię i nazwisko
@@ -61,8 +65,9 @@ const RANGES   = [("UV", "UV", (100.0, 380.0)), ("widzialne", "visible", (380.0,
 # kompilacja JIT dzieje się raz na proces Julii, więc przycisk "Rozgrzej" znika dla wszystkich nowych stron po pierwszym użyciu
 const WARMED = Ref(false)
 
-# język interfejsu na starcie: "pl" albo "en" (przełącza się przyciskiem PL/EN)
-const LANG_DEFAULT = "pl"
+# język interfejsu: adres (?lang=pl) ma pierwszeństwo, potem język przeglądarki (Accept-Language: polski albo angielski),
+# a gdy przeglądarka nie podaje żadnego z nich, używany jest LANG_DEFAULT; przełącza się przyciskiem PL | EN
+const LANG_DEFAULT = "en"
 
 # jednostki osi X: klucze (używane w kodzie) i napisy na liście
 const UNIT_KEYS = ["nm", "Å", "µm", "cm⁻¹", "eV"]
@@ -148,6 +153,11 @@ end
 # udział procentowy: pełne procenty od 10% wzwyż, poniżej 2 cyfry znaczące
 fmt_pct(f) = f >= 0.1 ? "$(round(Int, 100f))%" : "$(round(100f; sigdigits = 2))%"
 
+# Odczyt ustawień z adresu strony (?z=26&T=8000&...): liczby i wartości logiczne z wartościami domyślnymi.
+q_num(q, k, default) = (v = tryparse(Float64, get(q, k, "")); (v === nothing || !isfinite(v)) ? default : v)
+q_int(q, k, default, lo, hi) = clamp(round(Int, q_num(q, k, default)), lo, hi)
+q_bool(q, k, default) = haskey(q, k) ? q[k] == "1" : default
+
 # Napisy interfejsu (klucz => (PL, EN)). Napisy zmieniające się dynamicznie (opis linii, pasek informacji,
 # okno "O programie") są tłumaczone na miejscu przez L(pl, en) w build_app.
 const TR = Dict(
@@ -175,8 +185,11 @@ const TR = Dict(
                        "Shows lines weaker than the reference line by at most this many orders of magnitude (decades); e.g. 4 = up to 10,000 times weaker. " *
                        "On the logarithmic scale it also sets the scale of the line heights."),
     "resol"     => ("Rozdzielczość [nm]:", "Resolution [nm]:"),
-    "resolpx"   => ("lub zależna od zoomu [px]:", "or zoom-dependent [px]:"),
+    "resolpx"   => ("rozdzielczość zależna od zoomu [px]:", "zoom-dependent resolution [px]:"),
+    "saha"      => ("równowaga jonizacji (Saha)", "ionization equilibrium (Saha)"),
+    "lg_ne"     => ("lg n_e [cm⁻³]:", "lg n_e [cm⁻³]:"),
     "bw"        => ("czarno-białe", "black and white"),
+    "gray"      => ("linie poza światłem widzialnym szare", "lines outside visible light in gray"),
     "members"   => ("składowe zlanych linii w opisie", "components of merged lines in the description"),
     "tip1"      => ("atom niezjonizowany (X)", "neutral atom (X)"),
     "tip2"      => ("jednokrotnie zjonizowane (X⁺)", "singly ionized (X⁺)"),
@@ -185,6 +198,9 @@ const TR = Dict(
     "tip5"      => ("czterokrotnie zjonizowane (X⁴⁺)", "quadruply ionized (X⁴⁺)"),
     "langtip"   => ("Język interfejsu: PL / EN", "Interface language: PL / EN"),
     "save"      => ("💾 Zapisz obraz", "💾 Save image"),
+    "linktip"   => ("Kopiuj link do bieżącego widoku (adres strony zawiera ustawienia, więc odświeżenie strony też je zachowuje)",
+                    "Copy a link to the current view (the page address holds the settings, so reloading the page keeps them too)"),
+    "tbl_title" => ("Linie w widoku", "Lines in view"),
     "warming"   => ("⏳ Rozgrzewanie…", "⏳ Warming up…"),
     "warmtip"   => ("Pierwsze użycie każdej funkcji kompiluje kod, co powoduje chwilowe lagi. Przycisk wykonuje przykładowe operacje " *
                     "(przesunięcia, powiększenia, skala, jednostki, suwaki temperatury i zakresu jasności, inny pierwiastek), potem przywraca ustawienia i znika.",
@@ -208,14 +224,25 @@ function dd2(opts_pl, opts_en; index = 1)
 end
 
 function build_app()
-    return Bonito.App(title = "Spektruś.jl") do session
+    return Bonito.App(title = "Spektruś.jl") do session, request
+        q = parse_query(request.target)        # ustawienia z adresu strony (pusty słownik, gdy ich nie ma)
+        t_load = time();  t_prev = Ref(t_load)
+        load_lap(label) = LOAD_TIMING && (now = time();
+            println("  [load] ", rpad(label, 36), lpad(round(Int, 1000 * (now - t_prev[])), 6), " ms   (łącznie ",
+                    round(Int, 1000 * (now - t_load)), " ms)");
+            t_prev[] = now; nothing)
         # ---------------- kontrolki ----------------
         # pierwiastek: nazwa, symbol i liczba atomowa to trzy powiązane kontrolki (jedna wspólna wartość Zsel)
-        z0       = something(findfirst(==(11), ELEMENTS.Z), 1)
+        z0       = something(findfirst(==(q_int(q, "z", 11, 1, 99)), ELEMENTS.Z), findfirst(==(11), ELEMENTS.Z), 1)
         Zsel     = Observable(ELEMENTS.Z[z0])
 
         # język interfejsu i pomocnicze funkcje tłumaczenia
-        lang = Observable(LANG_DEFAULT)
+        accept = ""                              # nagłówek Accept-Language wysłany przez przeglądarkę
+        for (k, v) in request.headers
+            lowercase(String(k)) == "accept-language" && (accept = String(v); break)
+        end
+        lang0 = get(q, "lang", pick_language(accept; default = LANG_DEFAULT))
+        lang = Observable(lang0 in ("pl", "en") ? lang0 : LANG_DEFAULT)
         L(pl, en) = lang[] == "en" ? en : pl                       # tekst w bieżącym języku
         tr(key) = map(l -> TR[key][l == "en" ? 2 : 1], lang)       # Observable napisu (zmienia się z językiem)
         show_for(l) = map(x -> x == l ? "display:inline-flex;align-items:center;gap:6px;" : "display:none;", lang)
@@ -238,27 +265,29 @@ function build_app()
                                         const v = Math.round(parseFloat(event.srcElement.value));
                                         if (Number.isFinite(v) && $(z_val).value != v) { $(z_val).notify(v); }
                                     }""")
-        unit_d   = dd2(UNIT_OPTS_PL, UNIT_OPTS_EN)
-        med_d    = dd2(["powietrze", "próżnia"], ["air", "vacuum"])
-        xs_d     = dd2(["liniowa", "logarytmiczna"], ["linear", "logarithmic"])
-        scale_d  = dd2(["logarytmiczna", "liniowa"], ["logarithmic", "linear"])
-        src_d    = dd2(["model LTE", "NIST"], ["LTE model", "NIST"])
+        unit_d   = dd2(UNIT_OPTS_PL, UNIT_OPTS_EN; index = q_int(q, "u", 1, 1, length(UNIT_OPTS_PL)))
+        med_d    = dd2(["powietrze", "próżnia"], ["air", "vacuum"]; index = q_int(q, "med", 1, 1, 2))
+        xs_d     = dd2(["liniowa", "logarytmiczna"], ["linear", "logarithmic"]; index = q_int(q, "xs", 1, 1, 2))
+        scale_d  = dd2(["logarytmiczna", "liniowa"], ["logarithmic", "linear"]; index = q_int(q, "sc", 1, 1, 2))
+        src_d    = dd2(["model LTE", "NIST"], ["LTE model", "NIST"]; index = q_int(q, "src", 1, 1, 2))
         ref_d    = dd2(["linia widzialna", "linia w oknie", "linia pierwiastka"],
-                       ["visible-range line", "line in window", "element line"])
-        ion1_cb  = Bonito.Checkbox(true)                     # linie niezjonizowane (I)
-        ion2_cb  = Bonito.Checkbox(false)                    # linie zjonizowane (II)
-        ion3_cb  = Bonito.Checkbox(false)                    # podwójnie zjonizowane (III)
-        ion4_cb  = Bonito.Checkbox(false)                    # potrójnie zjonizowane (IV)
-        ion5_cb  = Bonito.Checkbox(false)                    # poczwórnie zjonizowane (V)
-        saha_cb  = Bonito.Checkbox(true)                     # równowaga jonizacji (Saha)
-        bw_cb    = Bonito.Checkbox(false)                    # tryb czarno-biały
-        members_cb = Bonito.Checkbox(false)                  # lista składowych zlanych linii w opisie
-        T_sl     = Bonito.Slider(1000:100:20000; value = 6000)
-        ne_sl    = Bonito.Slider(12.0:0.5:18.0; value = 15.0)     # lg n_e [cm⁻³] (dla Sahy)
-        res_sl   = Bonito.Slider(0.0:0.1:5.0; value = 0.0)
-        thr_sl   = Bonito.Slider(0.5:0.1:6.0; value = 4.0)
-        rescb    = Bonito.Checkbox(false)                    # rozdzielczość zależna od zoomu
-        px_sl    = Bonito.Slider(1:10; value = 2)            # ... w pikselach ekranu
+                       ["visible-range line", "line in window", "element line"]; index = q_int(q, "ref", 1, 1, 3))
+        ionset   = haskey(q, "ions") ? Set(filter(!isnothing, tryparse.(Int, split(q["ions"], ',')))) : Set([1])
+        ion1_cb  = Bonito.Checkbox(1 in ionset)              # linie niezjonizowane (I)
+        ion2_cb  = Bonito.Checkbox(2 in ionset)              # linie zjonizowane (II)
+        ion3_cb  = Bonito.Checkbox(3 in ionset)              # podwójnie zjonizowane (III)
+        ion4_cb  = Bonito.Checkbox(4 in ionset)              # potrójnie zjonizowane (IV)
+        ion5_cb  = Bonito.Checkbox(5 in ionset)              # poczwórnie zjonizowane (V)
+        saha_cb  = Bonito.Checkbox(q_bool(q, "saha", true))  # równowaga jonizacji (Saha)
+        bw_cb    = Bonito.Checkbox(q_bool(q, "bw", false))   # tryb czarno-biały
+        gray_cb  = Bonito.Checkbox(q_bool(q, "gray", false)) # linie UV i IR szare (jak w oryginalnym Spektrusiu)
+        members_cb = Bonito.Checkbox(q_bool(q, "mem", false))    # lista składowych zlanych linii w opisie
+        T_sl     = Bonito.Slider(1000:100:20000; value = snap(1000:100:20000, q_num(q, "T", 6000)))
+        ne_sl    = Bonito.Slider(12.0:0.5:18.0; value = snap(12.0:0.5:18.0, q_num(q, "ne", 15.0)))     # lg n_e [cm⁻³] (dla Sahy)
+        res_sl   = Bonito.Slider(0.0:0.1:5.0; value = snap(0.0:0.1:5.0, q_num(q, "res", 0.0)))
+        thr_sl   = Bonito.Slider(0.5:0.1:6.0; value = snap(0.5:0.1:6.0, q_num(q, "thr", 4.0)))
+        rescb    = Bonito.Checkbox(q_bool(q, "rescb", false))        # rozdzielczość zależna od zoomu
+        px_sl    = Bonito.Slider(1:10; value = q_int(q, "px", 2, 1, 10))     # ... w pikselach ekranu
         b_left   = Bonito.Button("◀")
         b_right  = Bonito.Button("▶")
         b_zin    = Bonito.Button("＋")
@@ -274,13 +303,31 @@ function build_app()
         warm_b   = Bonito.Button("🔥 Warm up")
         warm_state = Observable(WARMED[] ? "done" : "idle")        # "idle" -> "running" -> "done"
         about_open = Observable(false)
+        table_a    = Bonito.Button("📋 Tabela linii")
+        table_b    = Bonito.Button("📋 Line table")
+        tbl_csv_a  = Bonito.Button("Pobierz CSV")
+        tbl_csv_b  = Bonito.Button("Download CSV")
+        tbl_tsv_a  = Bonito.Button("Pobierz TSV")
+        tbl_tsv_b  = Bonito.Button("Download TSV")
+        tbl_close_a = Bonito.Button("✕ Zamknij")
+        tbl_close_b = Bonito.Button("✕ Close")
+        link_btn   = Bonito.Button("🔗 Link")
+        link_msg   = Observable("")
+        table_open = Observable(false)
+        table_rev  = Observable(0)           # zwiększany, gdy tabela ma się odświeżyć (zmiana widoku)
+        help_a     = Bonito.Button("❓ Pomoc")
+        help_b     = Bonito.Button("❓ Help")
+        help_open  = Observable(false)
+        key_event  = Observable("")          # naciśnięty klawisz skrótu (przekazywany z przeglądarki, z numerem, by każde naciśnięcie było zmianą)
 
         info  = Observable("")
+        note  = Observable("")            # ostrzeżenie pod paskiem informacji (np. stopień bez danych do LTE)
         hover = Observable(L("Najedź kursorem na linię.", "Hover over a line."))
         summary = Observable("")      # „N linii spektralnych o względnej sumie natężeń X”
         hint    = Observable("")      # podpowiedź o zaznaczaniu i powiększaniu
         members_txt = Observable("")  # składowe zlanych linii (gdy włączone)
 
+        load_lap("kontrolki (widżety)")
         # ---------------- stan osi X (potrzebny już przy tworzeniu osi) ----------------
         log_x  = Ref(false)               # czy oś X jest logarytmiczna
         unit_x = Ref("nm")                # jednostka osi X (klucz z UNIT_KEYS)
@@ -304,14 +351,71 @@ function build_app()
                   xtickformat = fmt_x, axstyle...)
         linkxaxes!(ax_strip, ax)
         xlims!(ax, 380, 780)
+        load_lap("wykres (Figure, osie)")
 
         # ---------------- stan ----------------
-        view_x    = Ref((380.0, 780.0))   # bieżący zakres osi X [nm] (w nm, nie w log10)
+        xq        = tryparse.(Float64, split(get(q, "x", ""), ','))
+        x_init    = (length(xq) == 2 && all(!isnothing, xq) && all(isfinite, xq) && xq[1] < xq[2]) ? (xq[1], xq[2]) : (380.0, 780.0)
+        view_x    = Ref(x_init)           # bieżący zakres osi X [nm] (w nm, nie w log10); zacznij od widoku z adresu
         redrawing = Ref(false)            # ignorujemy zmiany limitów wywołane przez nasz kod
         print_mode = Ref(false)           # tryb zapisu na jasnym tle: tylko na czas zrzutu PNG
         cache     = Ref{Any}(nothing)     # ostatnio policzone linie (element, T, ośrodek, źródło)
         shown     = Ref{Any}(nothing)     # to, co widać na wykresie (dla podpowiedzi)
         cur_res   = Ref(RES_FLOOR)        # rozdzielczość zlewania użyta przy ostatnim rysowaniu [nm]
+
+        # ---------------- adres strony = stan widoku (zapamiętywanie ustawień i link) ----------------
+        # Adres w przeglądarce jest aktualizowany po każdej zmianie widoku (z opóźnieniem 0,6 s), więc odświeżenie
+        # strony przywraca ustawienia, a skopiowany adres otwiera dokładnie ten sam widok.
+        function current_qs()
+            x0, x1 = view_x[]
+            ions = [z for (z, cb) in enumerate((ion1_cb, ion2_cb, ion3_cb, ion4_cb, ion5_cb)) if cb.value[]]
+            kv = ("z" => Zsel[], "x" => "$(round(x0; sigdigits = 8)),$(round(x1; sigdigits = 8))",
+                  "u" => unit_d.idx[], "xs" => xs_d.idx[], "sc" => scale_d.idx[], "src" => src_d.idx[],
+                  "ref" => ref_d.idx[], "med" => med_d.idx[], "ions" => join(ions, ','),
+                  "T" => T_sl.value[], "ne" => ne_sl.value[], "thr" => thr_sl.value[], "res" => res_sl.value[],
+                  "px" => px_sl.value[], "rescb" => Int(rescb.value[]), "saha" => Int(saha_cb.value[]),
+                  "bw" => Int(bw_cb.value[]), "gray" => Int(gray_cb.value[]), "mem" => Int(members_cb.value[]), "lang" => lang[])
+            return join(["$k=$v" for (k, v) in kv], "&")
+        end
+
+        # tabela pojedynczych linii w bieżącym widoku (z progiem jasności jak na wykresie), od najsilniejszej
+        function current_table()
+            s = shown[]
+            s === nothing && return nothing
+            x0, x1 = view_x[]
+            rows = Int[]
+            for i in eachindex(s.first)
+                append!(rows, s.first[i]:s.last[i])
+            end
+            rows = [r for r in rows if x0 <= s.lines.λ[r] <= x1]
+            isempty(rows) && return nothing
+            return line_table(s.lines, rows, s.Iref, unit_x[])
+        end
+
+        url_ready  = Ref(false)           # adres aktualizujemy dopiero po pierwszym rysowaniu
+        url_last   = Ref("")
+        sync_wait  = Ref(false)
+        function ui_sync!()               # zlewa serię zmian widoku w jedną aktualizację adresu i tabeli
+            sync_wait[] && return nothing
+            sync_wait[] = true
+            @async begin
+                sleep(0.6)
+                sync_wait[] = false
+                try
+                    if url_ready[]
+                        qs = current_qs()
+                        if qs != url_last[]
+                            url_last[] = qs
+                            Bonito.evaljs(session, Bonito.js"""history.replaceState(null, '', '?' + $(qs));""")
+                        end
+                    end
+                    table_open[] && (table_rev[] += 1)
+                catch e
+                    @warn "Aktualizacja adresu/tabeli nie powiodła się" exception = (e, catch_backtrace())
+                end
+            end
+            return nothing
+        end
 
         # --- współrzędne osi X ---
         # Oś Makie jest zawsze liniowa; skalę logarytmiczną i jednostki realizujemy sami: X to wartość w
@@ -448,6 +552,7 @@ function build_app()
                 saha    = saha_cb.value[]
                 ne_exp  = Float64(ne_sl.value[])
                 bw      = bw_cb.value[]
+                gray_out = gray_cb.value[]
                 logmode = xs_d.idx[] == 2
                 unit_key = UNIT_KEYS[clamp(unit_d.idx[], 1, length(UNIT_KEYS))]
                 energy   = unit_is_energy(unit_key)
@@ -463,6 +568,7 @@ function build_app()
                 end
                 lines   = cache[].spec.lines
                 use_lte = cache[].spec.use_lte
+                skipped = cache[].spec.skipped
                 lap("odczyt ustawień + linie (cache)")
 
                 x0, x1 = clamp_view(view_x[]..., logmode; positive = logmode || energy)
@@ -495,7 +601,8 @@ function build_app()
                 for (j, k) in enumerate(idx)
                     h = line_height(cl.I[k], Iref, decades; scale = scale)
                     X = to_X(cl.λ[k])
-                    (cr, cg, cb) = bw ? (1.0, 1.0, 1.0) : wl2rgb(cl.λ[k])
+                    (cr, cg, cb) = bw ? (1.0, 1.0, 1.0) :
+                                   (gray_out && !(380.0 <= cl.λ[k] <= 780.0)) ? (0.62, 0.62, 0.62) : wl2rgb(cl.λ[k])
                     # zapis na jasnym tle (do druku): czarne albo przyciemnione kreski, w głównym wykresie i na pasku
                     (mr, mg, mb) = !print_mode[] ? (cr, cg, cb) : bw ? (0.0, 0.0, 0.0) : darken_for_light((cr, cg, cb))
                     a = print_mode[] ? 0.3 + 0.7 * h : 0.15 + 0.85 * h        # na bieli słabe linie bledną, więc podnosimy minimum
@@ -533,6 +640,13 @@ function build_app()
                           use_lte ? L("model LTE", "LTE model") * ", T = $(Int(T)) K$saha_txt" :
                           (source == "lte" ? L("NIST (brak Aki dla tego pierwiastka, LTE niedostępny)",
                                                "NIST (no Aki for this element, LTE unavailable)") : "NIST")
+                note[] = isempty(skipped) ? "" :
+                    L("⚠ Model LTE nie narysuje linii stopnia " * join(["$(ROMAN[z]) ($(skipped[z]) linii)" for z in sort!(collect(keys(skipped)))], ", ") *
+                      ": NIST nie podaje dla nich współczynnika Aki. Wybierz źródło „NIST”, żeby je zobaczyć " *
+                      "(natężenia umowne, niewspółmierne między stopniami).",
+                      "⚠ The LTE model will not draw the lines of stage " * join(["$(ROMAN[z]) ($(skipped[z]) lines)" for z in sort!(collect(keys(skipped)))], ", ") *
+                      ": NIST gives no Aki coefficient for them. Choose the “NIST” source to see them " *
+                      "(arbitrary intensities, not comparable between stages).")
                 info[] = L("Linie widoczne: $(length(idx)) z $(length(cl.λ)) (całe widmo)   ·   " *
                            "źródło natężeń: $src_txt   ·   odniesienie jasności: $(round(Iref; sigdigits = 3))   ·   " *
                            "rozdzielczość: $(round(res; sigdigits = 2)) nm",
@@ -540,6 +654,7 @@ function build_app()
                            "intensity source: $src_txt   ·   brightness reference: $(round(Iref; sigdigits = 3))   ·   " *
                            "resolution: $(round(res; sigdigits = 2)) nm")
                 lap("info")
+                ui_sync!()
                 TIMING && println("  [redraw] ", rpad("RAZEM (strona Julii)", 34),
                                   lpad(round(Int, 1000 * (time() - t_start)), 6), " ms")
             finally
@@ -571,7 +686,7 @@ function build_app()
         # ---------------- reakcje ----------------
         onany(Zsel, unit_d.idx, med_d.idx, xs_d.idx, scale_d.idx, src_d.idx, ref_d.idx,
               ion1_cb.value, ion2_cb.value, ion3_cb.value, ion4_cb.value, ion5_cb.value,
-              saha_cb.value, ne_sl.value, bw_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
+              saha_cb.value, ne_sl.value, bw_cb.value, gray_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
             request_redraw!()
         end
 
@@ -625,17 +740,36 @@ function build_app()
         for b in (about_a, about_b)
             on(b.value) do _
                 about_open[] = !about_open[]
+                about_open[] && (help_open[] = false)
+            end
+        end
+        for b in (help_a, help_b)
+            on(b.value) do _
+                help_open[] = !help_open[]
+                help_open[] && (about_open[] = false)
             end
         end
         on(lang_btn.value) do _
             lang[] = lang[] == "en" ? "pl" : "en"
         end
+        # opis funkcji podziału zależy od tego, czy jest levels.csv (pełne listy poziomów NIST)
+        levels_full = level_db() !== nothing
+        U_pl = levels_full ?
+            "Funkcje podziału U_z liczone są z pełnych list poziomów NIST (levels.csv), uzupełnionych o poziomy z pobranych linii; poziomy poniżej energii jonizacji. " :
+            "Funkcje podziału U_z liczone są z poziomów występujących w pobranych liniach, więc to przybliżenie (dla złożonych atomów może zaniżać U). "
+        U_en = levels_full ?
+            "The partition functions U_z are computed from the full NIST level lists (levels.csv), supplemented with levels from the downloaded lines; levels below the ionization energy. " :
+            "The partition functions U_z are computed from the levels that appear in the downloaded lines, so this is an approximation (for complex atoms it may underestimate U). "
         about_panel = map(about_open, lang) do o, _l
             o || return Bonito.DOM.div()
             Bonito.DOM.div(
                 Bonito.DOM.h3("Spektruś.jl"; style = "margin:0 0 6px 0;"),
                 Bonito.DOM.p(Bonito.DOM.b(L("Autorzy tej wersji: ", "Authors of this version: ")), AUTHOR,
                              L(" oraz Claude (Anthropic).", " and Claude (Anthropic).")),
+                Bonito.DOM.p(L("Kolory linii: przybliżenie długości fali na RGB według algorytmu Dana Brutona (tak jak w oryginalnym Spektrusiu); " *
+                               "poza światłem widzialnym kolory są umowne.",
+                               "Line colors: wavelength-to-RGB approximation by Dan Bruton's algorithm (as in the original Spektruś); " *
+                               "outside visible light the colors are conventional.")),
                 Bonito.DOM.p(L("Kod źródłowy: ", "Source code: "),
                              Bonito.DOM.a(REPO_URL; href = REPO_URL, target = "_blank", style = "color:#8cf;")),
                 Bonito.DOM.p(L("Odtworzenie programu Spektruś 1.0 (Mikołaj Pytel, 2002) w Julii. " *
@@ -651,16 +785,12 @@ function build_app()
                                           target = "_blank", style = "color:#8cf;"), "."),
                 Bonito.DOM.p(L("Natężenia: model LTE, emisja optycznie cienka, I ∝ (N_z/N)·g_k·A_ki·ν·exp(−E_k/kT)/U_z(T) " *
                                "(temperatura z suwaka T). Udziały stopni jonizacji N_z/N wynikają z równowagi Saha dla " *
-                               "gęstości elektronowej n_e (suwak lg n_e); uwzględniono stopnie I–V. Funkcje podziału U_z liczone " *
-                               "są z poziomów występujących w pobranych liniach, więc to przybliżenie (dla złożonych atomów " *
-                               "może zaniżać U). Energie jonizacji: tabela z pakietu mendeleev (zgodna z NIST ASD w sprawdzonych " *
+                               "gęstości elektronowej n_e (suwak lg n_e); uwzględniono stopnie I–V. " * U_pl * "Energie jonizacji: tabela z pakietu mendeleev (zgodna z NIST ASD w sprawdzonych " *
                                "przypadkach). Po wyłączeniu opcji Saha jasności linii różnych stopni jonizacji nie są " *
                                "porównywalne, a w obrębie jednego stopnia są.",
                                "Intensities: LTE model, optically thin emission, I ∝ (N_z/N)·g_k·A_ki·ν·exp(−E_k/kT)/U_z(T) " *
                                "(temperature from the T slider). The ionization stage fractions N_z/N come from the Saha equilibrium " *
-                               "for the electron density n_e (lg n_e slider); stages I–V are included. The partition functions U_z " *
-                               "are computed from the levels that appear in the downloaded lines, so this is an approximation " *
-                               "(for complex atoms it may underestimate U). Ionization energies: a table from the mendeleev package " *
+                               "for the electron density n_e (lg n_e slider); stages I–V are included. " * U_en * "Ionization energies: a table from the mendeleev package " *
                                "(consistent with NIST ASD in the cases checked). With the Saha option off, the brightnesses of lines " *
                                "of different ionization stages are not comparable, while within a single stage they are.")),
                 Bonito.DOM.p(Bonito.DOM.b(L("Źródła modelu fizycznego. ", "Sources of the physical model. ")),
@@ -727,15 +857,22 @@ function build_app()
             end
             view_x[] = (clo, chi)
             set_ticks!(ticks_for(clo, chi))
+            ui_sync!()
             (ref_d.idx[] == 2 || rescb.value[]) && schedule_redraw!()
         end
 
         # podpowiedź po najechaniu na linię
+        cursor = Observable("")                       # odczyt położenia kursora w jednostce osi (niezależnie od linii)
+        cursor_digits = Dict("nm" => 3, "Å" => 2, "µm" => 5, "cm⁻¹" => 1, "eV" => 4)
         function hover_handler(_)
             s = shown[]
             s === nothing && return
             if !(Makie.is_mouseinside(ax.scene) || Makie.is_mouseinside(ax_strip.scene))
+                cursor[] = ""
                 return
+            end
+            let u = unit_x[], v = unit_value(from_X_nm(mouseposition(ax.scene)[1]), unit_x[])
+                cursor[] = L("kursor: ", "cursor: ") * "$(round(v; digits = get(cursor_digits, u, 3))) $u"
             end
             λs = s.λ
             if isempty(λs)
@@ -866,6 +1003,127 @@ function build_app()
             end
         end
 
+        # ---------------- tabela linii, kopiowanie, link ----------------
+        csv_text(t; delim = ',') = (io = IOBuffer(); CSV.write(io, t; delim = delim); String(take!(io)))
+
+        # Pobranie pliku CSV. Dane przekazujemy jako base64: Bonito wstawia interpolowane teksty do kodu JS w apostrofach
+        # bez zamiany znaków nowej linii, więc wieloliniowy tekst bezpośrednio psułby składnię. Plik ma UTF-8 z BOM,
+        # żeby Excel poprawnie czytał polskie i specjalne znaki.
+        function download_text(text, fname; mime = "text/csv;charset=utf-8")
+            b64 = Base64.base64encode(vcat(UInt8[0xef, 0xbb, 0xbf], codeunits(text)))
+            Bonito.evaljs(session, Bonito.js"""
+                (function () {
+                    const bin = atob($(b64));
+                    const bytes = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
+                    const blob = new Blob([bytes], {type: $(mime)});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = $(fname);
+                    document.body.appendChild(a); a.click(); a.remove();
+                    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+                })();
+            """)
+        end
+
+        for b in (table_a, table_b)
+            on(b.value) do _
+                table_open[] = !table_open[]
+            end
+        end
+        for b in (tbl_close_a, tbl_close_b)
+            on(b.value) do _
+                table_open[] = false
+            end
+        end
+        function export_table!(delim, ext, mime)       # pobranie tabeli linii z bieżącego widoku (wszystkie linie, nie tylko 200)
+            t = current_table()
+            t === nothing && return nothing
+            x0, x1 = view_x[]
+            sym = string(ELEMENTS.symbol[something(findfirst(==(Zsel[]), ELEMENTS.Z), 1)])
+            download_text(csv_text(t; delim = delim), "spektrus_$(sym)_lines_$(round(Int, x0))-$(round(Int, x1))nm.$ext"; mime = mime)
+            return nothing
+        end
+        for b in (tbl_csv_a, tbl_csv_b)
+            on(b.value) do _
+                export_table!(',', "csv", "text/csv;charset=utf-8")
+            end
+        end
+        for b in (tbl_tsv_a, tbl_tsv_b)
+            on(b.value) do _
+                export_table!('\t', "tsv", "text/tab-separated-values;charset=utf-8")
+            end
+        end
+        on(link_btn.value) do _
+            qs = current_qs()
+            url_last[] = qs
+            Bonito.evaljs(session, Bonito.js"""
+                (function () {
+                    history.replaceState(null, '', '?' + $(qs));
+                    const text = window.location.href;
+                    function fallback() {
+                        const ta = document.createElement('textarea');
+                        ta.value = text; document.body.appendChild(ta); ta.select();
+                        try { document.execCommand('copy'); } catch (e) {}
+                        ta.remove();
+                    }
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(text).catch(fallback);
+                    } else { fallback(); }
+                })();
+            """)
+            link_msg[] = L("✓ skopiowano", "✓ copied")
+            @async begin
+                sleep(2.5)
+                link_msg[] = ""
+            end
+        end
+
+        # skróty klawiszowe: strzałki przesuwają, + i − zmieniają powiększenie, Home/End zakresy, F1 pomoc, Esc zamyka okna
+        on(key_event) do s
+            k = first(split(s, ':'))
+            if k == "ArrowLeft"
+                move_view!(1.0, -0.1)
+            elseif k == "ArrowRight"
+                move_view!(1.0, 0.1)
+            elseif k == "+" || k == "="
+                move_view!(0.5, 0.0)
+            elseif k == "-" || k == "_"
+                move_view!(2.0, 0.0)
+            elseif k == "Home"
+                view_x[] = RANGES[2][3]
+                request_redraw!()
+            elseif k == "End"
+                view_x[] = RANGES[4][3]
+                request_redraw!()
+            elseif k == "F1"
+                help_open[] = !help_open[]
+                help_open[] && (about_open[] = false)
+            elseif k == "Escape"
+                about_open[] = false
+                help_open[] = false
+                table_open[] = false
+            end
+        end
+        keys_js = Bonito.js"""
+            (function () {
+                document.addEventListener('keydown', function (e) {
+                    const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+                    if (tag === 'input' || tag === 'textarea' || tag === 'select') { return; }
+                    if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+                    const keys = ['ArrowLeft', 'ArrowRight', '+', '=', '-', '_', 'Home', 'End', 'F1', 'Escape'];
+                    if (keys.indexOf(e.key) < 0) { return; }
+                    e.preventDefault();
+                    $(key_event).notify(e.key + ':' + Date.now());
+                });
+            })();
+        """
+        if isdefined(Bonito, :on_document_load)
+            Bonito.on_document_load(session, keys_js)
+        else
+            @async (sleep(3); Bonito.evaljs(session, keys_js))
+        end
+
         # zapis wykresu jako PNG: pobieramy obraz z canvasu WebGL w przeglądarce. WebGL czyści bufor rysowania po
         # wyświetleniu klatki, więc na chwilę podpinamy się pod requestAnimationFrame i robimy zrzut tuż po tym,
         # jak WGLMakie narysuje klatkę (pusty zrzut rozpoznajemy po rozmiarze i próbujemy w następnej klatce).
@@ -972,7 +1230,10 @@ function build_app()
             request_redraw!()
         end
 
+        load_lap("definicje funkcji i reakcji")
         redraw!()    # pierwsze rysowanie
+        load_lap("pierwsze rysowanie (redraw!)")
+        url_ready[] = true
 
         # ---------------- układ strony ----------------
         # Cała strona mieści się w oknie (bez przewijania, bo kółko myszy służy do zoomu):
@@ -990,6 +1251,8 @@ function build_app()
             style = "display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:$(mb)px;")
         lab(key, items...) = Bonito.DOM.span(lbl(key), items...;                     # key: klucz w TR
             style = "display:inline-flex;align-items:center;gap:6px;")
+        cblab(key, cb) = Bonito.DOM.label(cb, Bonito.DOM.span(tr(key));            # pole wyboru PRZED opisem, klikalny tekst
+            style = "display:inline-flex;align-items:center;gap:6px;cursor:pointer;")
         ion(rom, cb, tipkey) = Bonito.DOM.span(Bonito.DOM.span(rom), cb; title = tr(tipkey),
             style = "display:inline-flex;align-items:center;gap:3px;")
         val(obs) = Bonito.DOM.span(map(string, obs); style = "min-width:3em;")
@@ -1009,23 +1272,157 @@ function build_app()
                                     end)),
                 row(Bonito.DOM.b(tr("g_int")); mb = 4),
                 row(lab("source", ddv(src_d)),
-                    Bonito.DOM.span(Bonito.DOM.span("Saha, lg n_e [cm⁻³]:"), saha_cb, ne_sl, val(ne_sl.value);
-                                    style = "display:inline-flex;align-items:center;gap:6px;"),
+                    Bonito.DOM.span(cblab("saha", saha_cb), lab("lg_ne", ne_sl, val(ne_sl.value));
+                                    style = "display:inline-flex;align-items:center;gap:14px;"),
                     lab("scale", ddv(scale_d)),
                     lab("reference", ddv(ref_d))),
                 row(Bonito.DOM.b(tr("g_merge")); mb = 4),
                 row(Bonito.DOM.span(lbl("threshold"), thr_sl, val(thr_sl.value); title = tr("thresholdtip"),
                                     style = "display:inline-flex;align-items:center;gap:6px;"),
                     lab("resol", res_sl, val(res_sl.value)),
-                    lab("resolpx", rescb, px_sl, val(px_sl.value))),
+                    Bonito.DOM.span(cblab("resolpx", rescb), px_sl, val(px_sl.value);
+                                    style = "display:inline-flex;align-items:center;gap:6px;")),
                 row(Bonito.DOM.b(tr("g_look")); mb = 4),
-                row(lab("bw", bw_cb),
-                    lab("members", members_cb); mb = 0);
+                row(cblab("bw", bw_cb),
+                    cblab("gray", gray_cb),
+                    cblab("members", members_cb); mb = 0);
                 style = "position:absolute;left:12px;z-index:20;margin-top:4px;padding:10px 14px;" *
                         "background:#1e1e24;border:1px solid #666;border-radius:6px;box-sizing:border-box;" *
                         "width:max-content;max-width:calc(100vw - 24px);max-height:70vh;overflow:auto;" *
                         "box-shadow:0 6px 20px rgba(0,0,0,0.6);");
             style = "position:static;")
+
+        help_panel = map(help_open, lang) do o, _l
+            o || return Bonito.DOM.div()
+            kbd(s) = Bonito.DOM.span(s; style = "border:1px solid #777;border-radius:3px;padding:0 5px;margin:0 1px;font-family:monospace;background:#2a2a31;")
+            Bonito.DOM.div(
+                Bonito.DOM.h3(L("Pomoc", "Help"); style = "margin:0 0 6px 0;"),
+                Bonito.DOM.h4(L("Jak korzystać z programu", "How to use the program"); style = "margin:10px 0 4px 0;"),
+                Bonito.DOM.ul(
+                    Bonito.DOM.li(L("Wybierz pierwiastek. Nazwa, symbol i liczba atomowa są ze sobą powiązane, więc możesz użyć dowolnego z nich. " *
+                                    "Zaznacz stopnie jonizacji: I to atomy obojętne, II–V to jony (II = atom, który stracił jeden elektron). " *
+                                    "Zwykle wystarczy I.",
+                                    "Choose an element. Name, symbol and atomic number are linked, so you can use any of them. " *
+                                    "Tick the ionization stages: I is the neutral atom, II–V are ions (II = an atom that lost one electron). " *
+                                    "Stage I is usually enough.")),
+                    Bonito.DOM.li(L("Zakres widma: przyciski UV, widzialne, IR i wszystko. Widok przesuwasz przyciskami ◀ ▶, a powiększasz i pomniejszasz przyciskami ＋ i －. " *
+                                    "Możesz też zaznaczyć fragment wykresu lewym przyciskiem myszy (zostanie powiększony), użyć kółka myszy do zoomu " *
+                                    "i przeciągać prawym przyciskiem, żeby przesuwać.",
+                                    "Spectrum range: the UV, visible, IR and all buttons. Pan with ◀ ▶ and zoom with ＋ and －. " *
+                                    "You can also select a part of the plot with the left mouse button (it will be magnified), zoom with the mouse wheel " *
+                                    "and drag with the right button to pan.")),
+                    Bonito.DOM.li(L("Najedź kursorem na linię: pod wykresem pojawi się jej opis (pierwiastek i stopień, długość fali, przejście między poziomami, " *
+                                    "współczynnik Aki i natężenie względne). Pod wykresem widać też położenie kursora w bieżącej jednostce.",
+                                    "Hover over a line: its description appears below the plot (element and stage, wavelength, transition between levels, " *
+                                    "Aki coefficient and relative intensity). The cursor position in the current unit is shown there as well.")),
+                    Bonito.DOM.li(L("Linie leżące bardzo blisko siebie są rysowane jako jedna kreska. Powiększ widok albo zmniejsz rozdzielczość w ustawieniach, żeby je rozdzielić. " *
+                                    "Dublet D sodu (589,0 i 589,6 nm) można tak rozdzielić.",
+                                    "Lines lying very close together are drawn as one bar. Zoom in or lower the resolution in the settings to separate them. " *
+                                    "The sodium D doublet (589.0 and 589.6 nm) can be separated this way.")),
+                    Bonito.DOM.li(L("Jednostki osi: nm, Å, µm, cm⁻¹ i eV (dwie ostatnie rosną z energią, więc widmo jest odbite względem osi w nm).",
+                                    "Axis units: nm, Å, µm, cm⁻¹ and eV (the last two increase with energy, so the spectrum is mirrored relative to the nm axis).")),
+                    Bonito.DOM.li(L("⚙ Ustawienia: skala osi, powietrze lub próżnia, źródło natężeń, gęstość elektronowa n_e, zakres jasności " *
+                                    "(ile rzędów wielkości słabsze od linii odniesienia linie pokazać), rozdzielczość zlewania linii i kolory. " *
+                                    "Temperaturę T ustawiasz suwakiem obok.",
+                                    "⚙ Settings: axis scale, air or vacuum, intensity source, electron density n_e, brightness range " *
+                                    "(how many orders of magnitude weaker than the reference line to show), line merging resolution and colors. " *
+                                    "The temperature T is set with the slider next to it.")),
+                    Bonito.DOM.li(L("📋 Tabela linii pokazuje linie z widoku i pozwala pobrać je jako CSV lub TSV. 💾 Zapisz obraz zapisuje wykres jako PNG " *
+                                    "(także na jasnym tle do druku). 🔗 Link kopiuje adres, który otwiera dokładnie ten sam widok.",
+                                    "📋 Line table lists the lines in view and lets you download them as CSV or TSV. 💾 Save image saves the plot as a PNG " *
+                                    "(also on a light background for printing). 🔗 Link copies an address that opens exactly the same view.")),
+                    Bonito.DOM.li(L("Skróty klawiszowe: ", "Keyboard shortcuts: "),
+                                  kbd("←"), kbd("→"), L(" przesuwanie (przytrzymaj, żeby przesuwać dalej); ", " pan (hold to keep panning); "),
+                                  kbd("+"), kbd("−"), L(" powiększanie i pomniejszanie; ", " zoom in and out; "),
+                                  kbd("Home"), L(" światło widzialne (380–780 nm); ", " visible light (380–780 nm); "),
+                                  kbd("End"), L(" całe widmo; ", " whole spectrum; "),
+                                  kbd("F1"), L(" ta pomoc; ", " this help; "),
+                                  kbd("Esc"), L(" zamyka okna. Skróty nie działają, gdy kursor jest w polu tekstowym, na liście lub suwaku.",
+                                                " closes the panels. Shortcuts do not work while a text field, list or slider has the focus.")),
+                    style = "margin:0 0 6px 0;padding-left:20px;"),
+                Bonito.DOM.h4(L("Krótkie wprowadzenie do spektroskopii", "A short introduction to spectroscopy"); style = "margin:12px 0 4px 0;"),
+                Bonito.DOM.p(L("Światło białe rozszczepione przez pryzmat daje tęczę: widmo ciągłe, w którym kolory płynnie przechodzą jeden w drugi. " *
+                               "Takie widmo wysyłają rozżarzone ciała stałe i ciecze oraz gęste gazy, na przykład włókno żarówki.",
+                               "White light split by a prism gives a rainbow: a continuous spectrum in which the colors blend smoothly into one another. " *
+                               "Glowing solids and liquids and dense gases, for example a light-bulb filament, emit such a spectrum.")),
+                Bonito.DOM.p(L("Rozrzedzony gaz, który świeci (w wyładowaniu elektrycznym albo w płomieniu), wysyła inne światło: tylko kilka wąskich linii " *
+                               "o różnych natężeniach, a pomiędzy nimi ciemność. To widmo liniowe, które pokazuje ten program. " *
+                               "Przyrząd do oglądania widm to spektroskop; gdy zapisuje obraz, nazywa się spektrografem, a gdy mierzy natężenie " *
+                               "poszczególnych części widma, spektrofotometrem.",
+                               "A glowing low-density gas (in an electric discharge or a flame) emits different light: just a few narrow lines " *
+                               "of different intensities with darkness between them. This is the line spectrum shown by this program. " *
+                               "A device for viewing spectra is a spectroscope; if it records an image it is a spectrograph, and if it measures " *
+                               "the intensity of different parts of the spectrum it is a spectrophotometer.")),
+                Bonito.DOM.p(L("Linie powstają, bo energia atomu jest skwantowana: atom może mieć tylko ściśle określone energie. Gdy przechodzi z poziomu " *
+                               "wyższego na niższy, wysyła foton o energii równej różnicy tych poziomów, czyli o ściśle określonej długości fali. " *
+                               "Każdy pierwiastek ma inną budowę, więc inny zestaw linii: to jego odcisk palca. Dlatego z widma można rozpoznać skład " *
+                               "chemiczny nieznanej substancji, także z daleka, na przykład gwiazdy (w widmach gwiazd linie najczęściej widać jako ciemne " *
+                               "linie absorpcyjne w tych samych miejscach).",
+                               "Lines arise because the energy of an atom is quantized: an atom can only have precisely defined energies. When it drops " *
+                               "from a higher level to a lower one, it emits a photon whose energy equals the difference between the levels, so it has " *
+                               "a precisely defined wavelength. Every element has a different structure and therefore a different set of lines: its " *
+                               "fingerprint. That is why a spectrum can reveal the chemical composition of an unknown substance, even from afar, for " *
+                               "example of a star (in stellar spectra the lines usually appear as dark absorption lines at the same wavelengths).")),
+                Bonito.DOM.p(L("Spróbuj: wybierz sód. Najsilniejsza linia jest żółta (to w rzeczywistości dwie linie blisko siebie, powiększ widok), " *
+                               "dlatego sodowe lampy uliczne świecą żółto-pomarańczowo. Rtęć ma silne linie w niebieskiej i zielonej części widma, " *
+                               "a neon w pomarańczowo-czerwonej, stąd barwy lamp rtęciowych i neonowych.",
+                               "Try it: choose sodium. The strongest line is yellow (really two lines close together, zoom in), which is why sodium " *
+                               "street lamps glow yellow-orange. Mercury has strong lines in the blue and green parts of the spectrum and neon in the " *
+                               "orange-red, hence the colors of mercury and neon lamps.")),
+                Bonito.DOM.p(L("Światło nie kończy się na barwach, które widzimy. Program pokazuje też ultrafiolet i podczerwień; kolory tych linii są umowne " *
+                               "(w ustawieniach można je zamienić na szare).",
+                               "Light does not end at the colors we can see. The program also shows ultraviolet and infrared; the colors of those " *
+                               "lines are conventional (you can turn them gray in the settings).")),
+                Bonito.DOM.h4(L("O modelu natężeń", "About the intensity model"); style = "margin:12px 0 4px 0;"),
+                Bonito.DOM.p(L("Natężenia linii liczy model równowagi termodynamicznej (LTE): zależą od temperatury T, od tego, ilu atomów jest w danym " *
+                               "stopniu jonizacji (równowaga Saha, zależna od gęstości elektronowej n_e) i od prawdopodobieństwa przejścia Aki. " *
+                               "To model poglądowy, dobry do nauki i porównań, a nie do pomiarów: w prawdziwych lampach i płomieniach natężenia mogą się " *
+                               "różnić. Dla części pierwiastków i stopni NIST nie podaje Aki; wtedy używane są umowne natężenia z NIST i program " *
+                               "ostrzega o tym pod wykresem.",
+                               "Line intensities are computed with a local thermodynamic equilibrium (LTE) model: they depend on the temperature T, on how " *
+                               "many atoms are in each ionization stage (Saha equilibrium, which depends on the electron density n_e) and on the " *
+                               "transition probability Aki. It is an illustrative model, good for learning and comparisons but not for measurements: " *
+                               "intensities in real lamps and flames can differ. For some elements and stages NIST gives no Aki; then the arbitrary " *
+                               "NIST intensities are used and the program warns about it below the plot."));
+                style = "padding:10px 14px;background:#1e1e24;border:1px solid #666;border-radius:6px;box-sizing:border-box;" *
+                        "max-width:860px;max-height:70vh;overflow:auto;box-shadow:0 6px 20px rgba(0,0,0,0.6);line-height:1.4;")
+        end
+
+        table_panel = map(table_open, table_rev, lang) do o, _r, _l
+            o || return Bonito.DOM.div()
+            t = current_table()
+            t === nothing && return Bonito.DOM.div(L("Brak linii w widoku.", "No lines in view."); style = "color:#aaa;")
+            n = size(t, 1)
+            m = min(n, TABLE_ROWS)
+            unit = unit_x[]
+            dig = get(Dict("nm" => 3, "Å" => 2, "µm" => 5, "cm⁻¹" => 2, "eV" => 4), unit, 3)
+            th(s) = Bonito.DOM.th(s; style = "text-align:left;padding:2px 10px;border-bottom:1px solid #555;position:sticky;top:0;background:#1e1e24;")
+            td(s, extra = "") = Bonito.DOM.td(s; style = "padding:1px 10px;white-space:nowrap;" * extra)
+            aki(x) = ismissing(x) ? "—" : string(round(x; sigdigits = 3))
+            rows = [Bonito.DOM.tr(td(string(round(t.axis_value[i]; digits = dig)), "font-family:monospace;text-align:right;"),
+                                  td(fmt_rel(t.intensity_percent[i]), "text-align:right;"),
+                                  td("$(t.element[i]) $(t.stage[i])"),
+                                  td("$(t.lower_level[i]) → $(t.upper_level[i])", "color:#bbb;"),
+                                  td(aki(t.Aki_s[i]), "text-align:right;color:#bbb;")) for i in 1:m]
+            head = L("$n linii w widoku" * (n > m ? " (pokazano $m najsilniejszych; plik CSV zawiera wszystkie)" : ""),
+                     "$n lines in view" * (n > m ? " ($m strongest shown; the CSV file contains all of them)" : ""))
+            Bonito.DOM.div(
+                Bonito.DOM.div(head; style = "color:#9aa;font-size:0.85em;margin-bottom:4px;"),
+                Bonito.DOM.table(
+                    Bonito.DOM.thead(Bonito.DOM.tr(th("λ [$unit]"), th("I [%]"), th(L("Linia", "Line")),
+                                                   th(L("Przejście", "Transition")), th("Aki [s⁻¹]"))),
+                    Bonito.DOM.tbody(rows...);
+                    style = "border-collapse:collapse;font-size:0.85em;"))
+        end
+        table_box = Bonito.DOM.div(
+            Bonito.DOM.div(Bonito.DOM.b(tr("tbl_title")),
+                           pair(tbl_csv_a, tbl_csv_b; w = length("Download CSV") + 3),
+                           pair(tbl_tsv_a, tbl_tsv_b; w = length("Download TSV") + 3),
+                           pair(tbl_close_a, tbl_close_b; w = length("✕ Zamknij") + 3);
+                           style = "display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;"),
+            Bonito.DOM.div(table_panel; style = "max-height:50vh;overflow:auto;");
+            style = map(o -> o ? "display:block;background:#1e1e24;border:1px solid #666;border-radius:6px;padding:10px 14px;" *
+                               "box-shadow:0 6px 20px rgba(0,0,0,0.6);box-sizing:border-box;" : "display:none;", table_open))
 
         save_menu = Bonito.DOM.details(
             Bonito.DOM.summary(lbl("save")),
@@ -1037,6 +1434,7 @@ function build_app()
                         "width:max-content;max-width:calc(100vw - 24px);box-shadow:0 6px 20px rgba(0,0,0,0.6);");
             class = "sp-save", style = "position:static;")
 
+        load_lap("panele i menu")
         return Bonito.DOM.div(
             css,
             row(Bonito.DOM.b("Spektruś.jl"; style = "font-size:1.2em;margin-right:6px;"),
@@ -1059,7 +1457,11 @@ function build_app()
                                 style = "display:inline-flex;align-items:center;gap:6px;"),
                 more,
                 pair(about_a, about_b; w = length("ⓘ O programie") + 3),
+                pair(help_a, help_b; w = length("❓ Pomoc") + 3),
                 Bonito.DOM.span(lang_btn; title = tr("langtip")),
+                pair(table_a, table_b; w = length("📋 Line table") + 3),
+                Bonito.DOM.span(link_btn; title = tr("linktip")),
+                Bonito.DOM.span(link_msg; style = "color:#8f8;font-size:0.85em;"),
                 save_menu,
                 Bonito.DOM.span(pair(warm_a, warm_b; w = length("🔥 Rozgrzej") + 3); title = tr("warmtip"),
                                 style = map(st -> st == "idle" ? "display:inline-block;" : "display:none;", warm_state)),
@@ -1067,10 +1469,16 @@ function build_app()
                                 style = map(st -> st == "running" ? "display:inline-block;color:#fc8;" : "display:none;", warm_state))),
             Bonito.DOM.div(Bonito.DOM.div(about_panel; style = "position:absolute;z-index:30;left:12px;right:12px;");
                            style = "position:relative;height:0;"),
+            Bonito.DOM.div(Bonito.DOM.div(help_panel; style = "position:absolute;z-index:31;left:12px;right:12px;");
+                           style = "position:relative;height:0;"),
+            Bonito.DOM.div(Bonito.DOM.div(table_box; style = "position:absolute;z-index:25;left:12px;right:12px;");
+                           style = "position:relative;height:0;"),
             Bonito.DOM.div(fig; class = "sp-fig", style = "flex:1 1 auto;min-height:0;position:relative;overflow:hidden;"),
             Bonito.DOM.div(info; style = "margin-top:4px;color:#9aa;font-size:0.85em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"),
+            Bonito.DOM.div(note; style = "color:#fc8;font-size:0.85em;overflow:hidden;"),
             Bonito.DOM.div(
-                Bonito.DOM.div(summary; style = "min-height:1.3em;"),
+                Bonito.DOM.div(Bonito.DOM.span(cursor; style = "float:right;color:#9aa;font-size:0.85em;font-family:monospace;"),
+                               summary; style = "min-height:1.3em;"),
                 Bonito.DOM.div(hover; style = "font-family:monospace;color:#bbb;min-height:1.3em;"),
                 Bonito.DOM.div(members_txt; style = "font-family:monospace;color:#bbb;white-space:pre;overflow:auto;max-height:6em;"),
                 Bonito.DOM.div(hint; style = "color:#889;font-size:0.9em;min-height:1.2em;");
@@ -1081,9 +1489,37 @@ function build_app()
     end
 end
 
+# Wstępne przygotowanie rdzenia: wczytanie levels.csv i wykonanie głównych obliczeń na próbce, żeby kompilacja i
+# wczytywanie danych nie obciążały pierwszej strony po starcie (część JIT dotyczy tylko Makie/Bonito i wymaga
+# prawdziwej strony, tego nie da się rozgrzać po stronie serwera).
+function warm_core!()
+    t0 = time()
+    try
+        level_db()
+        for (Z, ions) in ((11, [1]), (26, [1, 2]))
+            sp = prepare_lines(DF, Z; ions = ions, medium = "air", source = "lte", T = 6000.0, saha = true, ne = 1e15)
+            l = sp.lines
+            isempty(l.I) && continue
+            cl = cluster_window(l, -Inf, Inf, 0.1)
+            Iref = reference_intensity(l, 380.0, 780.0; ref = "visible")
+            idx = findall(visible_mask(cl.I, Iref, 4.0))
+            isempty(idx) || line_height(cl.I[first(idx)], Iref, 4.0; scale = "log")
+            line_table(l, collect(1:min(100, size(l, 1))), Iref, "nm")
+        end
+        fig = Figure(size = (600, 300))                  # kompilacja tworzenia wykresów Makie (bez przeglądarki)
+        ax = Axis(fig[1, 1])
+        linesegments!(ax, [Point2d(0, 0), Point2d(1, 1)]; color = [RGBAf(1, 1, 1, 1), RGBAf(1, 1, 1, 1)])
+        xlims!(ax, 0, 1)
+    catch e
+        @warn "Wstępne przygotowanie nie powiodło się (aplikacja zadziała, tylko wolniej na starcie)" exception = (e, catch_backtrace())
+    end
+    println("Przygotowanie rdzenia: $(round(time() - t0; digits = 1)) s")
+end
+
 app = build_app()
 
 if abspath(PROGRAM_FILE) == @__FILE__
+    get(ENV, "SPEKTRUS_WARM", "1") == "0" || warm_core!()        # SPEKTRUS_WARM=0 wyłącza przygotowanie rdzenia przy starcie
     server = Bonito.Server(app, "127.0.0.1", 8080)
     println("Spektruś działa: http://127.0.0.1:8080   (Ctrl+C kończy)")
     try

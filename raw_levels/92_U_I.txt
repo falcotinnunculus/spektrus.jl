@@ -1,0 +1,3 @@
+Configuration	Term	J	g	Prefix	Level (cm-1)	Suffix	Uncertainty (cm-1)	Reference
+"5f3.6d.7s2"	"5L*"	"6"	13	""	"0"	""	"0"	"L14620"
+"U II (5f3.7s2 4I*<9/2>)"	"Limit"	"---"		""	"49958.4"	""	"0.5"	"L5494,L7765"
