@@ -1,16 +1,11 @@
 # app.jl - Spektruś.jl w przeglądarce (Bonito + WGLMakie).
 #
-# Instalacja (raz; w tym samym oknie PowerShella ogranicz równoległość, żeby nie zabrakło RAM-u):
-#   $env:JULIA_NUM_PRECOMPILE_TASKS = 1
-#   julia --project=.
-#   ]add Bonito WGLMakie
+# Wymaga spectrum.csv (patrz README: fetch_nist_lines.jl, prepare_lines.jl); levels.csv jest opcjonalny.
 #
-# Uruchomienie:
+# Uruchomienie (z folderu projektu):
 #   julia --project=. .\app.jl
-# i otwórz http://127.0.0.1:8080 (Ctrl+C kończy).
-#
-# Obsługa wykresu: kółko myszy = zoom, przeciągnięcie lewym = zaznaczenie obszaru do powiększenia,
-# przeciągnięcie prawym = przesuwanie, przyciski UV/widzialne/IR/wszystko = zakres.
+# i otwórz http://127.0.0.1:8080 (Ctrl+C kończy). Instalacja pakietów i opis funkcji: README.md,
+# notatki dla programisty: NOTES.md. Obsługa w programie: przycisk "Pomoc" albo F1.
 
 using Bonito, WGLMakie
 include(joinpath(@__DIR__, "Spektrus.jl"))
@@ -45,11 +40,12 @@ const X_MIN       = 0.0       # dolna granica [nm], skala liniowa
 const X_MIN_LOG   = 10.0      # dolna granica [nm], skala logarytmiczna (log(0) nie istnieje)
 const X_MAX       = 3000.0    # górna granica [nm]; dane NIST sięgają 2500 nm
 const X_MIN_WIDTH = 0.002     # najwęższe okno [nm] w skali liniowej (w logarytmicznej: 0,002 dekady)
-const TABLE_ROWS   = 200      # ile najsilniejszych linii pokazuje tabela (CSV zawiera wszystkie linie w widoku)
-const LOAD_TIMING = false     # true: konsola pokazuje czasy kolejnych etapów budowania strony przy każdym wczytaniu
+const TABLE_ROWS  = 200       # ile najsilniejszych linii pokazuje tabela (CSV i TSV zawierają wszystkie linie w widoku)
 const RES_FLOOR   = 1e-4      # najmniejsza rozdzielczość zlewania linii [nm] (linie bliższe niż to uznajemy za tę samą)
+const TIMING      = false     # true: konsola pokazuje czasy etapów przerysowania wykresu (redraw!)
+const LOAD_TIMING = false     # true: konsola pokazuje czasy etapów budowania strony przy każdym wczytaniu
 
-# autor tej wersji (wyświetlany w oknie "O programie" obok Claude'a) - wpisz swoje imię i nazwisko
+# autorzy tej wersji (okno "O programie"): AUTHOR oraz Claude (Anthropic)
 const AUTHOR = "Mateusz Winiarski"
 const REPO_URL = "https://github.com/falcotinnunculus/spektrus.jl"
 
@@ -513,8 +509,7 @@ function build_app()
             return nothing
         end
 
-        # pomiar czasu etapów redraw! (wypisywany w konsoli; ustaw TIMING = false, żeby wyłączyć)
-        TIMING = false
+        # pomiar czasu etapów redraw! (włącza go stała TIMING na początku pliku)
         tmark = Ref(time())
         function lap(label)
             TIMING || return nothing

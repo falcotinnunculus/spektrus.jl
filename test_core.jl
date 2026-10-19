@@ -1,6 +1,7 @@
-# test_core.jl - szybki test rdzenia na prawdziwych danych.
+# test_core.jl - szybki test rdzenia (Spektrus.jl) na prawdziwych danych; interfejsu nie testuje.
 #   julia --project=. .\test_core.jl
-# Wymaga spectrum.csv (po prepare_lines.jl) i Spektrus.jl w tym samym folderze.
+# Wymaga spectrum.csv (po prepare_lines.jl) i Spektrus.jl w tym samym folderze. levels.csv nie jest potrzebny:
+# testy wyłączają go (poza sekcją o levels.csv, która używa własnego, sztucznego pliku).
 
 include("Spektrus.jl")
 using .Spektrus, DataFrames
@@ -147,6 +148,13 @@ let q = parse_query("/?z=26&x=380,780&lang=en&ions=1%2C3")
     check("parse_query: brak zapytania daje pusty słownik", isempty(parse_query("/")) && isempty(parse_query("/?")))
     check("snap: wartość z adresu trafia w krok suwaka", snap(1000:100:20000, 6049) == 6000 && snap(0.5:0.1:6.0, 4.04) ≈ 4.0)
 end
+
+# --- język z przeglądarki ---
+check("język: pl-PL na pierwszym miejscu daje polski", pick_language("pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7") == "pl")
+check("język: en-US przed pl daje angielski", pick_language("en-US,en;q=0.9,pl;q=0.8") == "en")
+check("język: brak polskiego i angielskiego daje angielski (domyślny)", pick_language("de-DE,de;q=0.9,fr;q=0.5") == "en")
+check("język: polski dalej na liście, ale jedyny obsługiwany, daje polski", pick_language("de,pl;q=0.5") == "pl")
+check("język: pusty nagłówek, gwiazdka i q=0 dają domyślny", pick_language("") == "en" && pick_language("*") == "en" && pick_language("pl;q=0, en;q=0.5") == "en")
 
 # --- opis linii ---
 println("\nPrzykład opisu: ", describe_line(na.lines, findfirst(==(top.λ), na.lines.λ)))

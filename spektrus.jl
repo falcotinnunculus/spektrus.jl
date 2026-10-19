@@ -1,5 +1,6 @@
-# Spektrus.jl - rdzeń aplikacji (bez interfejsu): dane, fizyka, łączenie linii.
-# Używany przez test_core.jl i (w następnym kroku) przez aplikację w przeglądarce.
+# Spektrus.jl - rdzeń aplikacji (bez interfejsu): wczytanie danych, model natężeń (LTE + Saha), łączenie linii,
+# jednostki osi, nazwy pierwiastków, tabela linii, odczyt ustawień z adresu strony.
+# Używany przez app.jl (interfejs), test_core.jl (testy) i skrypty pomocnicze.
 #
 #   include("Spektrus.jl"); using .Spektrus
 
