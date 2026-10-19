@@ -198,6 +198,11 @@ const TR = Dict(
     "tip5"      => ("czterokrotnie zjonizowane (X⁴⁺)", "quadruply ionized (X⁴⁺)"),
     "langtip"   => ("Język interfejsu: PL / EN", "Interface language: PL / EN"),
     "save"      => ("💾 Zapisz obraz", "💾 Save image"),
+    "presets"   => ("🧪 Przykłady", "🧪 Examples"),
+    "presetnote" => ("Ustawienia poglądowe: pierwiastek, stopnie jonizacji, światło widzialne i temperatura dobrane tak, by pokazać charakterystyczne linie. " *
+                     "W prawdziwych źródłach plazma często nie jest w równowadze LTE, więc proporcje natężeń mogą się różnić.",
+                     "Illustrative settings: element, ionization stages, visible light and a temperature chosen to show the characteristic lines. " *
+                     "In real sources the plasma is often not in LTE, so the intensity ratios may differ."),
     "linktip"   => ("Kopiuj link do bieżącego widoku (adres strony zawiera ustawienia, więc odświeżenie strony też je zachowuje)",
                     "Copy a link to the current view (the page address holds the settings, so reloading the page keeps them too)"),
     "tbl_title" => ("Linie w widoku", "Lines in view"),
@@ -245,15 +250,16 @@ function build_app()
         lang = Observable(lang0 in ("pl", "en") ? lang0 : LANG_DEFAULT)
         L(pl, en) = lang[] == "en" ? en : pl                       # tekst w bieżącym języku
         tr(key) = map(l -> TR[key][l == "en" ? 2 : 1], lang)       # Observable napisu (zmienia się z językiem)
-        show_for(l) = map(x -> x == l ? "display:inline-flex;align-items:center;gap:6px;" : "display:none;", lang)
+        show_for(l) = map(x -> x == l ? "display:flex;align-items:center;gap:6px;" : "display:none;", lang)
         # dwie wersje kontrolki (PL i EN), widoczna jedna; `w` = minimalna szerokość [ch], taka sama w obu językach
         pair(a, b; w = 0) = Bonito.DOM.span(Bonito.DOM.span(a; style = show_for("pl")),
                                             Bonito.DOM.span(b; style = show_for("en"));
-                                            style = "display:inline-block;" * (w > 0 ? "min-width:$(w)ch;" : ""))
+                                            class = "pair",
+                                            style = "display:inline-block;" * (w > 0 ? "min-width:$(round(0.5w; digits = 1))em;" : ""))
         ddv(d) = pair(d.a, d.b; w = d.w)
         # etykieta o stałej szerokości (najdłuższy z napisów PL/EN), żeby zmiana języka nie przesuwała kontrolek
         lbl(key) = Bonito.DOM.span(tr(key);
-                                   style = "display:inline-block;min-width:$(maximum(length, TR[key]))ch;")
+                                   style = "display:inline-block;min-width:$(round(0.48 * maximum(length, TR[key]); digits = 1))em;")
 
         name_d   = dd2(NAME_OPTS_PL, NAME_OPTS_EN; index = z0)
         sym_dd   = Bonito.Dropdown(SYM_OPTS; index = z0)
@@ -318,6 +324,13 @@ function build_app()
         help_a     = Bonito.Button("❓ Pomoc")
         help_b     = Bonito.Button("❓ Help")
         help_open  = Observable(false)
+        # przykłady: (nazwa PL, nazwa EN, Z, T [K], stopnie jonizacji); T dobrane poglądowo (gazy o wysokim wzbudzeniu: wyższa)
+        PRESETS = (("Lampa wodorowa", "Hydrogen lamp", 1, 10000, (1,)), ("Lampa helowa", "Helium lamp", 2, 10000, (1,)),
+                   ("Lampa neonowa", "Neon lamp", 10, 10000, (1,)), ("Lampa sodowa", "Sodium lamp", 11, 6000, (1,)),
+                   ("Lampa rtęciowa", "Mercury lamp", 80, 6000, (1,)),
+                   ("Wapń: linie H i K Słońca (Ca II)", "Calcium: solar H and K lines (Ca II)", 20, 5800, (1, 2)))
+        preset_btns = [(Bonito.Button(p[1]), Bonito.Button(p[2]), p[3], p[4], p[5]) for p in PRESETS]
+        preset_busy = Ref(false)          # na czas stosowania przykładu wstrzymuje przerysowania (jedno na końcu)
         key_event  = Observable("")          # naciśnięty klawisz skrótu (przekazywany z przeglądarki, z numerem, by każde naciśnięcie było zmianą)
 
         info  = Observable("")
@@ -687,6 +700,7 @@ function build_app()
         onany(Zsel, unit_d.idx, med_d.idx, xs_d.idx, scale_d.idx, src_d.idx, ref_d.idx,
               ion1_cb.value, ion2_cb.value, ion3_cb.value, ion4_cb.value, ion5_cb.value,
               saha_cb.value, ne_sl.value, bw_cb.value, gray_cb.value, T_sl.value, res_sl.value, thr_sl.value, rescb.value, px_sl.value) do args...
+            preset_busy[] && return nothing
             request_redraw!()
         end
 
@@ -829,6 +843,7 @@ function build_app()
         end
 
         range_nodes = Any[]
+        w_range = maximum(max(length(r[1]), length(r[2])) for r in RANGES) + 3     # jedna szerokość dla wszystkich czterech
         for (name_pl, name_en, (lo, hi)) in RANGES
             ba = Bonito.Button(name_pl)
             bb = Bonito.Button(name_en)
@@ -838,7 +853,7 @@ function build_app()
                     request_redraw!()
                 end
             end
-            push!(range_nodes, pair(ba, bb; w = max(length(name_pl), length(name_en)) + 3))
+            push!(range_nodes, pair(ba, bb; w = w_range))
         end
 
         # zakres ustawiony myszą (zoom/przesuwanie): zapamiętujemy go i pilnujemy granic osi
@@ -1079,6 +1094,36 @@ function build_app()
             end
         end
 
+        # przykłady: ustawiają pierwiastek, stopnie jonizacji, światło widzialne i temperaturę, a resztę widoku na wartości domyślne
+        function apply_preset!(Z, T, ions)
+            preset_busy[] = true
+            try
+                set_element!(Z)
+                T_sl.value[] = T
+                ne_sl.value[] = 15.0
+                saha_cb.value[] = true
+                for (i, cb) in enumerate((ion1_cb, ion2_cb, ion3_cb, ion4_cb, ion5_cb))
+                    cb.value[] = (i in ions)
+                end
+                unit_d.idx[] = 1;  med_d.idx[] = 1;  xs_d.idx[] = 1
+                scale_d.idx[] = 1;  src_d.idx[] = 1;  ref_d.idx[] = 1
+                thr_sl.value[] = 4.0
+                view_x[] = RANGES[2][3]
+            finally
+                preset_busy[] = false
+            end
+            request_redraw!()
+            return nothing
+        end
+        for (ba, bb, Z, T, ions) in preset_btns
+            for b in (ba, bb)
+                on(b.value) do _
+                    Bonito.evaljs(session, Bonito.js"""document.querySelector('.sp-presets').removeAttribute('open');""")
+                    @async apply_preset!(Z, T, ions)
+                end
+            end
+        end
+
         # skróty klawiszowe: strzałki przesuwają, + i − zmieniają powiększenie, Home/End zakresy, F1 pomoc, Esc zamyka okna
         on(key_event) do s
             k = first(split(s, ':'))
@@ -1245,10 +1290,13 @@ function build_app()
             .sp select { padding: 2px 4px !important; font-size: 0.9em !important; }
             .sp summary { cursor: pointer; user-select: none; padding: 3px 10px; border: 1px solid #666; border-radius: 4px; background: #2a2a31; }
             .sp summary:hover { background: #35353d; }
+            .sp .sym select { width: 4.4em !important; min-width: 0 !important; }
+            .sp .pair button, .sp .pair select { width: 100% !important; box-sizing: border-box !important; }
+            .sp .view button { width: 2.4em !important; padding-left: 0 !important; padding-right: 0 !important; }
             .sp details[open] summary { background: #3a3a44; }
             """)
         row(items...; mb = 6) = Bonito.DOM.div(items...;
-            style = "display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:$(mb)px;")
+            style = "display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:$(mb)px;")
         lab(key, items...) = Bonito.DOM.span(lbl(key), items...;                     # key: klucz w TR
             style = "display:inline-flex;align-items:center;gap:6px;")
         cblab(key, cb) = Bonito.DOM.label(cb, Bonito.DOM.span(tr(key));            # pole wyboru PRZED opisem, klikalny tekst
@@ -1327,6 +1375,12 @@ function build_app()
                                     "⚙ Settings: axis scale, air or vacuum, intensity source, electron density n_e, brightness range " *
                                     "(how many orders of magnitude weaker than the reference line to show), line merging resolution and colors. " *
                                     "The temperature T is set with the slider next to it.")),
+                    Bonito.DOM.li(L("🧪 Przykłady jednym kliknięciem ustawiają lampę wodorową, helową, neonową, sodową albo rtęciową (stopień I) lub wapń z liniami H i K " *
+                                    "Fraunhofera (jon Ca II, widoczny razem z atomem Ca I): pierwiastek, stopnie jonizacji, światło widzialne i poglądową " *
+                                    "temperaturę. Przywracają też domyślne ustawienia widoku.",
+                                    "🧪 Examples set up a hydrogen, helium, neon, sodium or mercury lamp (stage I) or calcium with the Fraunhofer H and K lines " *
+                                    "(the Ca II ion, shown together with the Ca I atom) with one click: element, ionization stages, visible light and an " *
+                                    "illustrative temperature. They also restore the default view settings.")),
                     Bonito.DOM.li(L("📋 Tabela linii pokazuje linie z widoku i pozwala pobrać je jako CSV lub TSV. 💾 Zapisz obraz zapisuje wykres jako PNG " *
                                     "(także na jasnym tle do druku). 🔗 Link kopiuje adres, który otwiera dokładnie ten sam widok.",
                                     "📋 Line table lists the lines in view and lets you download them as CSV or TSV. 💾 Save image saves the plot as a PNG " *
@@ -1424,6 +1478,17 @@ function build_app()
             style = map(o -> o ? "display:block;background:#1e1e24;border:1px solid #666;border-radius:6px;padding:10px 14px;" *
                                "box-shadow:0 6px 20px rgba(0,0,0,0.6);box-sizing:border-box;" : "display:none;", table_open))
 
+        w_preset = maximum(max(length(p[1]), length(p[2])) for p in PRESETS) + 3
+        presets_menu = Bonito.DOM.details(
+            Bonito.DOM.summary(lbl("presets")),
+            Bonito.DOM.div(
+                [row(pair(ba, bb; w = w_preset); mb = 4) for (ba, bb, _, _, _) in preset_btns]...,
+                Bonito.DOM.div(tr("presetnote"); style = "color:#9aa;font-size:0.8em;max-width:380px;margin-top:6px;");
+                style = "position:absolute;left:12px;z-index:20;margin-top:4px;padding:10px 14px;" *
+                        "background:#1e1e24;border:1px solid #666;border-radius:6px;box-sizing:border-box;" *
+                        "width:max-content;max-width:calc(100vw - 24px);box-shadow:0 6px 20px rgba(0,0,0,0.6);");
+            class = "sp-presets", style = "position:static;")
+
         save_menu = Bonito.DOM.details(
             Bonito.DOM.summary(lbl("save")),
             Bonito.DOM.div(
@@ -1439,10 +1504,10 @@ function build_app()
             css,
             row(Bonito.DOM.b("Spektruś.jl"; style = "font-size:1.2em;margin-right:6px;"),
                 lab("element", ddv(name_d)),
-                lab("symbol", sym_dd),
+                lab("symbol", Bonito.DOM.span(sym_dd; class = "sym")),
                 Bonito.DOM.span(Bonito.DOM.span("Z:"), z_in; style = "display:inline-flex;align-items:center;gap:6px;"),
                 grp(lbl("range"), range_nodes...),
-                grp(lbl("view"), b_left, b_right, b_zin, b_zout),
+                grp(lbl("view"), Bonito.DOM.span(b_left, b_right, b_zin, b_zout; class = "view", style = "display:inline-flex;gap:6px;")),
                 lab("units", ddv(unit_d))),
             row(grp(lbl("lines"),
                     ion("I", ion1_cb, "tip1"),
@@ -1456,6 +1521,7 @@ function build_app()
                 Bonito.DOM.span(Bonito.DOM.span("T [K]:"), T_sl, val(T_sl.value);
                                 style = "display:inline-flex;align-items:center;gap:6px;"),
                 more,
+                presets_menu,
                 pair(about_a, about_b; w = length("ⓘ O programie") + 3),
                 pair(help_a, help_b; w = length("❓ Pomoc") + 3),
                 Bonito.DOM.span(lang_btn; title = tr("langtip")),

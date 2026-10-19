@@ -1,0 +1,3 @@
+# normalizuj końce linii (w repozytorium LF, w katalogu roboczym zgodnie z systemem)
+* text=auto
+*.png binary
