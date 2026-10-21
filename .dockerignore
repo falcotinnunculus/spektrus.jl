@@ -1,0 +1,8 @@
+.git
+raw/
+raw_levels/
+lines.csv
+spectrum.csv
+levels.csv
+*.png
+spektrus_sysimage.*

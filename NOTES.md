@@ -46,6 +46,18 @@ Rzeczy, które nie są oczywiste:
    `warm_core!` przy starcie skraca to dla rdzenia i Makie, przycisk „Rozgrzej” robi to samo dla interakcji (znika po użyciu).
    Pełne rozwiązanie to sysimage (PackageCompiler), nie jest zrobione.
 
+## Wdrożenie
+
+- `Dockerfile` buduje obraz Julii 1.11, pobiera dane z GitHub Releases i buduje sysimage (`deploy/build_sysimage.jl`, ślad kompilacji
+  z `deploy/precompile_app.jl`: wczytanie danych, rdzeń, otwarcie strony przez HTTP). Do sysimage trafiają metody pakietów
+  (Bonito, Makie, DataFrames, CSV, HTTP), a własny kod (`app.jl`, `Spektrus.jl`) nie jest pakietem, więc nadal się kompiluje
+  przy starcie (`warm_core!`). Przekształcenie `Spektrus` w pakiet pozwoliłoby wkompilować i jego.
+- PackageCompiler wymaga kompilatora C (gcc lub clang); na Windowsie bywa kłopotliwy, dlatego sysimage buduje się w Dockerze.
+  Sysimage ma `cpu_target` przenośny między procesorami (`default_app_cpu_target`).
+- Serwer czyta `HOST`, `PORT` i `SPEKTRUS_URL` (zewnętrzny adres, czyli `proxy_url` w `Bonito.Server`). Za serwerem pośredniczącym
+  WebSocket musi być przekazywany; zły adres objawia się pustym wykresem albo zrywanym połączeniem.
+- `Manifest.toml` jest w repozytorium, żeby wdrożenie budowało dokładnie przetestowane wersje pakietów.
+
 ## Dane
 
 - NIST podaje kilka limitów serii w poziomach jednego jonu; energia jonizacji to najniższy z nich (`fetch_nist_levels.jl`).

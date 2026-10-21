@@ -39,6 +39,8 @@ julia --project=.
 | `ionization_energies.csv` | energie jonizacji stopni I–V (cm⁻¹, eV), potrzebne do równowagi Saha |
 | `test_core.jl` | testy rdzenia |
 | `NOTES.md` | notatki dla programisty: architektura, decyzje i pułapki |
+| `Dockerfile`, `deploy/` | wdrożenie: obraz Dockera ze sysimage (PackageCompiler), instrukcje dla Cloud Run i VPS |
+| `LICENSE` | licencja MIT |
 
 Pliki generowane (`spectrum.csv`, `lines.csv`, `levels.csv`, `raw/`, `raw_levels/`) są duże albo odtwarzalne, więc nie ma ich w repozytorium.
 
@@ -93,7 +95,14 @@ Parametry adresu (wszystkie opcjonalne, np. `/?z=26&ions=1,2&x=380,780&T=8000`):
 | `TIMING`, `LOAD_TIMING` | czasy przerysowania wykresu i budowania strony w konsoli (domyślnie wyłączone) |
 | `PRESETS` (w `build_app`) | przykłady: pierwiastek, temperatura i stopnie jonizacji; temperatury są poglądowe |
 
-Zmienna środowiskowa `SPEKTRUS_WARM=0` wyłącza przygotowanie rdzenia przy starcie (PowerShell: `$env:SPEKTRUS_WARM = "0"`).
+Zmienne środowiskowe (PowerShell: `$env:NAZWA = "wartość"`):
+
+| zmienna | znaczenie |
+|---|---|
+| `SPEKTRUS_WARM=0` | wyłącza przygotowanie rdzenia przy starcie |
+| `HOST` | adres nasłuchu (domyślnie `127.0.0.1`; na hostingu `0.0.0.0`) |
+| `PORT` | port (domyślnie `8080`) |
+| `SPEKTRUS_URL` | zewnętrzny adres `https://...`, gdy aplikacja stoi za serwerem pośredniczącym |
 
 ## Jednostki osi
 
@@ -110,6 +119,11 @@ Linie bez współczynnika Aki nie mają natężenia w modelu LTE: gdy żaden z w
 umownych natężeń NIST, a gdy tylko część, pomija te stopnie i ostrzega o tym pod wykresem.
 To model poglądowy (nauka, porównania), nie narzędzie pomiarowe.
 
+## Wdrożenie
+
+Obraz Dockera ze sysimage (skraca start i pierwsze wczytanie strony) oraz instrukcje dla Google Cloud Run i VPS są w
+[`deploy/README.md`](deploy/README.md).
+
 ## Testy
 
 ```
@@ -124,6 +138,10 @@ Testy sprawdzają rdzeń (`Spektrus.jl`) na prawdziwych danych. Interfejs (`app.
 - M. N. Saha, *Ionization in the solar chromosphere*, Philosophical Magazine 40, 472 (1920), doi:10.1080/14786441008636148
 - H. R. Griem, *Principles of Plasma Spectroscopy*, Cambridge University Press, 1997 (rozdz. 7: Thermodynamic equilibrium relations)
 - Kolory linii: przybliżenie długości fali na RGB według algorytmu Dana Brutona (jak w oryginalnym Spektrusiu).
+
+## Licencja
+
+MIT (plik `LICENSE`). Licencja dotyczy kodu; dane linii pochodzą z NIST Atomic Spectra Database (patrz cytowanie wyżej).
 
 ## Autorzy
 

@@ -1581,8 +1581,11 @@ app = build_app()
 
 if abspath(PROGRAM_FILE) == @__FILE__
     get(ENV, "SPEKTRUS_WARM", "1") == "0" || warm_core!()        # SPEKTRUS_WARM=0 wyłącza przygotowanie rdzenia przy starcie
-    server = Bonito.Server(app, "127.0.0.1", 8080)
-    println("Spektruś działa: http://127.0.0.1:8080   (Ctrl+C kończy)")
+    host = get(ENV, "HOST", "127.0.0.1")                # na hostingu (Docker): HOST=0.0.0.0
+    port = parse(Int, get(ENV, "PORT", "8080"))          # hostingi często podają port w zmiennej PORT
+    proxy_url = get(ENV, "SPEKTRUS_URL", "")             # zewnętrzny adres (https://...), gdy aplikacja stoi za serwerem pośredniczącym
+    server = isempty(proxy_url) ? Bonito.Server(app, host, port) : Bonito.Server(app, host, port; proxy_url = proxy_url)
+    println("Spektruś działa: http://$(host == "0.0.0.0" ? "127.0.0.1" : host):$port   (Ctrl+C kończy)")
     try
         while true
             sleep(1)
