@@ -25,11 +25,11 @@ ARG DATA_URL=https://github.com/falcotinnunculus/spektrus.jl/releases/download/d
 RUN curl -fsSL "$DATA_URL" | tar -xz
 
 # sysimage: najdłuższy krok budowania (kilka do kilkunastu minut)
-RUN fallocate -l 16G /swapfile && \
-    chmod 600 /swapfile && \
-    mkswap /swapfile && \
-    swapon /swapfile
-RUN JULIA_IMAGE_THREADS=1 julia --project=. deploy/build_sysimage.jl
+# RUN fallocate -l 16G /swapfile && \
+#     chmod 600 /swapfile && \
+#     mkswap /swapfile && \
+#     swapon /swapfile
+RUN JULIA_IMAGE_THREADS=1 julia --heap-size-hint=12G --project=. deploy/build_sysimage.jl
 
 ENV HOST=0.0.0.0 PORT=8080
 EXPOSE 8080
