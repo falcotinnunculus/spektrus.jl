@@ -29,8 +29,9 @@ RUN curl -fsSL "$DATA_URL" | tar -xz
 #     chmod 600 /swapfile && \
 #     mkswap /swapfile && \
 #     swapon /swapfile
-RUN JULIA_IMAGE_THREADS=1 julia --heap-size-hint=12G --project=. deploy/build_sysimage.jl
+# RUN JULIA_IMAGE_THREADS=1 julia --heap-size-hint=12G --project=. deploy/build_sysimage.jl
 
 ENV HOST=0.0.0.0 PORT=8080
 EXPOSE 8080
-CMD ["julia", "--project=.", "-J", "spektrus_sysimage.so", "app.jl"]
+# CMD ["julia", "--project=.", "-J", "spektrus_sysimage.so", "app.jl"]
+CMD ["julia", "--project=.", "app.jl"]
