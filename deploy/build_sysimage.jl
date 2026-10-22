@@ -26,6 +26,8 @@ t0 = time()
 create_sysimage(pkgs;
     sysimage_path = path,
     precompile_execution_file = joinpath(@__DIR__, "precompile_app.jl"),
-    cpu_target = PackageCompiler.default_app_cpu_target())      # przenośny między procesorami (obraz Dockera działa na różnych maszynach)
+    # cpu_target = PackageCompiler.default_app_cpu_target())      # przenośny między procesorami (obraz Dockera działa na różnych maszynach)
+    cpu_target="native",
+    filter_stdlibs=true)
 @info "Gotowe" sekundy = round(Int, time() - t0) rozmiar_MB = round(filesize(path) / 2^20; digits = 1)
 println("Uruchomienie: julia --project=. -J $(basename(path)) app.jl")
